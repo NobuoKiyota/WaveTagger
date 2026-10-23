@@ -8,6 +8,7 @@
 #include "Core/Attributes.h"
 #include "Core/Conditioning.h"
 #include "Core/Dataset.h"
+#include "Core/Dictionary.h"
 #include "Core/Exporter.h"
 #include "Core/FeatureStore.h"
 #include "Core/HardLinks.h"
@@ -18,6 +19,7 @@
 #include "Core/Xlsx.h"
 #include "UI/AttributeEditor.h"
 #include "UI/CategoryPicker.h"
+#include "UI/DictionaryWindow.h"
 #include "UI/InboxWindow.h"
 #include "UI/OrganizerWindow.h"
 #include "UI/InputSettings.h"
@@ -76,7 +78,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -89,6 +91,7 @@ public:
                                         : args[0] == "--selftest-condition" ? selfTestCondition()
                                         : args[0] == "--selftest-rating" ? selfTestRating()
                                         : args[0] == "--selftest-dataset" ? selfTestDataset()
+                                        : args[0] == "--selftest-dictionary" ? selfTestDictionary()
                                         : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
@@ -96,7 +99,7 @@ public:
             return;
         }
 
-        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-conditioning" || args[0] == "--snapshot-attributes" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
+        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-conditioning" || args[0] == "--snapshot-attributes" || args[0] == "--snapshot-dictionary" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
         {
             snapshotComponent (args[0], toFile (args[1]));
             return;
@@ -130,6 +133,7 @@ private:
         juce::AudioDeviceManager devices;
         std::unique_ptr<juce::Component> content;
         std::unique_ptr<FeatureStore> demoStore;
+        std::unique_ptr<Dictionary> demoDictionary;
         std::unique_ptr<juce::AudioFormatManager> demoFormats;
         if (mode == "--snapshot-organizer")
         {
@@ -198,6 +202,22 @@ private:
             hooks.getStatus = [] { return juce::String ("watching"); };
             content = std::make_unique<InboxPanel> (demoQueue, hooks);
         }
+        else if (mode == "--snapshot-dictionary")
+        {
+            // a throw-away dictionary with a few user entries, so the list shows both kinds
+            const auto demoFile = Catalog::defaultDirectory().getParentDirectory().getChildFile ("dictionary_demo/dictionary.csv");
+            demoFile.getParentDirectory().deleteRecursively();
+            demoDictionary = std::make_unique<Dictionary>();
+            demoDictionary->setFile (demoFile);
+            demoDictionary->setUserEntry ("cardboard box", WT_U8 ("段ボール箱"));
+            demoDictionary->setUserEntry ("rough", WT_U8 ("ざらざら"));
+            demoDictionary->setUserEntry ("strong", WT_U8 ("力強い"));
+            DictionaryPanel::Hooks hooks;
+            hooks.untranslated = [] { return juce::StringArray { "texture", WT_U8 ("かなづち") }; };
+            auto panel = std::make_unique<DictionaryPanel> (*demoDictionary, std::move (hooks));
+            panel->prepare ("texture");
+            content = std::move (panel);
+        }
         else if (mode == "--snapshot-attributes")
         {
             AttributeVocabulary vocab;
@@ -225,7 +245,7 @@ private:
                 input->setCurrentTabIndex (tab.getIntValue());
             content = std::move (input);
         }
-        if (mode != "--snapshot-organizer" && mode != "--snapshot-conditioning" && mode != "--snapshot-attributes")
+        if (mode != "--snapshot-organizer" && mode != "--snapshot-conditioning" && mode != "--snapshot-attributes" && mode != "--snapshot-dictionary")
             content->setSize (mode == "--snapshot-inbox" ? 1000 : picker ? 400 : 800, mode == "--snapshot-inbox" ? 460 : picker ? 560 : 580);
 
         const auto image = content->createComponentSnapshot (content->getLocalBounds());
@@ -2873,6 +2893,200 @@ private:
                    "typed cycles become clips (NG ones too: the dataset flags them), untyped ones are counted");
             check (clips.size() == 2 && clips[0].categoryJa == WT_U8 ("工具") && clips[0].typeJa == WT_U8 ("叩く") && clips[0].sourceFile == "window_take.wav" && clips[0].sourceSize == 1,
                    "the Japanese names come from the catalogue");
+        }
+
+        return ok;
+    }
+
+    bool selfTestDictionary()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        const auto base = testRoot.getChildFile ("dictionary_test");
+        base.deleteRecursively();
+        base.createDirectory();
+
+        const auto ja = [] (const char* s) { return juce::String::fromUTF8 (s); };
+
+        // ---- built-in words
+        {
+            Dictionary d;
+            check (d.toJapanese ("strong") == ja ("強い") && d.toEnglish (ja ("強い")) == "strong", "built-in words go both ways");
+            check (d.toJapanese ("  Strong ") == ja ("強い") && d.toJapanese (ja ("ＳＴＲＯＮＧ")) == ja ("強い"), "case, outer white space and full-width letters do not matter");
+            check (d.toJapanese ("cardboard") == ja ("段ボール") && d.toEnglish (ja ("ダンボール")) == "cardboard" && d.toEnglish (ja ("段ボール")) == "cardboard",
+                   "several Japanese words can stand for one English word (the first is the one used going out)");
+            check (! d.toJapanese ("weirdword") && ! d.toEnglish (ja ("ざらざら")), "an unknown word has no translation");
+            check (d.toJapanese (ja ("段ボール")) == ja ("段ボール") && d.toEnglish ("cardboard") == "cardboard", "a word already in the target language is returned as it is");
+            check (! d.toJapanese ("cardboard box") && ! d.toJapanese ("   "), "a phrase is never guessed from its parts");
+            check (Dictionary::isJapanese (ja ("段ボール")) && Dictionary::isJapanese (ja ("ダンボールbox")) && ! Dictionary::isJapanese ("cardboard"), "kana and kanji make a word Japanese");
+            check (Dictionary::isNeutral ("3m") && Dictionary::isNeutral ("12") && Dictionary::isNeutral ("-") && Dictionary::isNeutral ("-3.5dB")
+                       && ! Dictionary::isNeutral ("m3") && ! Dictionary::isNeutral ("strong"),
+                   "numbers and quantities such as 3m need no translation");
+            check (d.userCount() == 0 && d.entries().size() > 100, "there are over a hundred built-in words and no user entries");
+        }
+
+        // ---- the user's words: dictionary.csv
+        const auto file = base.getChildFile ("config/dictionary.csv");
+        {
+            Dictionary d;
+            d.setFile (file);
+            check (d.setUserEntry ("cardboard box", ja ("段ボール箱")), "a translation can be added (the folder is created)");
+            juce::MemoryBlock bytes;
+            file.loadFileAsData (bytes);
+            const auto* b = static_cast<const juce::uint8*> (bytes.getData());
+            check (bytes.getSize() > 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF && file.loadFileAsString().contains ("English,Japanese,Note"),
+                   "dictionary.csv is UTF-8 with a BOM and a header (Excel opens it correctly)");
+            check (d.toJapanese ("Cardboard Box") == ja ("段ボール箱") && d.toEnglish (ja ("段ボール箱")) == "cardboard box" && d.userCount() == 1, "it is used straight away, both ways");
+
+            Dictionary other;
+            other.setFile (file);
+            check (other.toJapanese ("cardboard box") == ja ("段ボール箱") && other.userCount() == 1, "another session (or PC) reading the file sees it");
+
+            check (d.setUserEntry ("strong", ja ("ゴツい")) && d.toJapanese ("strong") == ja ("ゴツい") && d.toEnglish (ja ("強い")) == "strong",
+                   "a user translation overrides a built-in one (the built-in word stays for the other direction)");
+            check (d.setUserEntry ("STRONG", ja ("力強い")) && d.userCount() == 2 && d.toJapanese ("strong") == ja ("力強い"), "the same English word again replaces the user's entry");
+            check (d.removeUserEntry ("Strong") && d.toJapanese ("strong") == ja ("強い") && d.userCount() == 1, "removing it brings the built-in translation back");
+            check (! d.removeUserEntry ("hammer") && ! d.removeUserEntry ("nothing at all"), "built-in words cannot be removed");
+            check (! d.setUserEntry ("", ja ("あ")) && ! d.setUserEntry ("word", "  "), "an empty side is refused");
+
+            check (d.setUserEntry ("a, b", "\"" + ja ("引用") + "\"") && Dictionary().entries().size() < d.entries().size(), "commas and quotes are allowed");
+            Dictionary again;
+            again.setFile (file);
+            check (again.toJapanese ("a, b") == "\"" + ja ("引用") + "\"", "and survive the file");
+        }
+
+        // ---- files written by other tools
+        {
+            const auto sjis = base.getChildFile("sjis/dictionary.csv");
+            sjis.getParentDirectory().createDirectory();
+            const auto bytes = encodeShiftJis (ja ("English,Japanese\r\nfoo bar,ほげ\r\n"));
+            sjis.replaceWithData (bytes.getData(), bytes.getSize());
+
+            Dictionary d;
+            d.setFile (sjis);
+            check (d.toJapanese ("foo bar") == ja ("ほげ") && d.userCount() == 1, "a file saved by Excel as plain CSV (Shift-JIS) is read correctly");
+
+            // somebody else edits the file while the app is running
+            const auto before = d.userCount();
+            sjis.replaceWithText (ja ("English,Japanese\r\nfoo bar,ほげ\r\nrough,ざらざら\r\n"), false, false, "\r\n");
+            check (d.reloadIfChanged() && d.toJapanese ("rough") == ja ("ざらざら") && d.userCount() == before + 1, "a change to the file is noticed and read");
+            check (! d.reloadIfChanged(), "and only once");
+
+            Dictionary none;
+            none.setFile (base.getChildFile ("missing/dictionary.csv"));
+            check (none.userCount() == 0 && none.toJapanese ("strong") == ja ("強い"), "a missing file is just an empty dictionary");
+        }
+
+        // ---- in the dataset
+        {
+            Dictionary d;
+            d.setFile (base.getChildFile ("dataset_config/dictionary.csv"));
+            d.setUserEntry ("cardboard", ja ("段ボール"));
+
+            DatasetClip c;
+            c.category = "TOOLS";
+            c.categoryJa = ja ("工具");
+            c.type = "Open";
+            c.typeJa = ja ("開く");
+            c.attributes = ja ("strength=strong material=段ボール size=3m texture=ざらざら");
+
+            check (datasetCaptionEn (c, &d) == ja ("Open (TOOLS), strength strong, material cardboard, size 3m, texture ざらざら")
+                       && datasetCaptionJa (c, &d) == ja ("開く (工具)、強さ 強い、素材 段ボール、大きさ 3m、texture ざらざら"),
+                   "both captions put the attribute words into their own language (what is unknown stays as typed)");
+            check (datasetCaptionEn (c) == ja ("Open (TOOLS), strength strong, material 段ボール, size 3m, texture ざらざら"), "without a dictionary nothing is translated");
+
+            // a recording of 2 s with one clip
+            AudioData audio;
+            audio.sampleRate = 48000.0;
+            audio.bitsPerSample = 24;
+            audio.buffer.setSize (1, 96000);
+            juce::Random rnd (7);
+            for (int i = 0; i < audio.buffer.getNumSamples(); ++i)
+                audio.buffer.setSample (0, i, (rnd.nextFloat() - 0.5f) * 0.2f);
+            c.start = 1000;
+            c.end = 48000;
+            c.sourceFile = "t.wav";
+            c.sourceSize = 99;
+            c.name = "Tools_Open01";
+
+            const auto folder = base.getChildFile ("set");
+            auto r = addToDataset (audio, { c }, folder, ConditionOptions {}, "test", &d);
+            juce::StringArray lines;
+            lines.addLines (folder.getChildFile ("metadata.jsonl").loadFileAsString());
+            auto line = juce::JSON::parse (lines[0]);
+
+            check (r.added == 1 && line.getProperty ("caption_ja", {}).toString() == datasetCaptionJa (c, &d)
+                       && line.getProperty ("tags_en", {}).getArray()->contains ("cardboard") && line.getProperty ("tags_ja", {}).getArray()->contains (ja ("段ボール"))
+                       && line.getProperty ("tags_ja", {}).getArray()->contains (ja ("強い")),
+                   "the dataset line has both captions and both tag lists");
+            check (line.getProperty ("attributes", {}).getProperty ("material", {}).toString() == ja ("段ボール")
+                       && line.getProperty ("attributes_en", {}).getProperty ("material", {}).toString() == "cardboard"
+                       && line.getProperty ("attributes_ja", {}).getProperty (ja ("素材"), {}).toString() == ja ("段ボール"),
+                   "the attributes stay as typed and come in English and Japanese as well");
+            check (r.untranslated.contains ("texture") && r.untranslated.contains (ja ("ざらざら")) && r.untranslated.size() == 2 && ! r.untranslated.contains ("3m")
+                       && line.getProperty ("untranslated", {}).getArray()->size() == 2,
+                   "words without a translation are listed (numbers are not), in the result and on the line");
+
+            // the user adds the missing words, adds the recording again: captions change, audio does not
+            const auto wav = folder.getChildFile ("audio/Tools_Open01.wav");
+            juce::MemoryBlock audioBefore;
+            wav.loadFileAsData (audioBefore);
+
+            d.setUserEntry ("texture", ja ("質感"));
+            d.setUserEntry ("rough", ja ("ざらざら"));
+            r = addToDataset (audio, { c }, folder, ConditionOptions {}, "test", &d);
+            lines.clear();
+            lines.addLines (folder.getChildFile ("metadata.jsonl").loadFileAsString());
+            line = juce::JSON::parse (lines[0]);
+            juce::MemoryBlock audioAfter;
+            wav.loadFileAsData (audioAfter);
+            check (r.updated == 1 && r.added == 0 && r.untranslated.isEmpty() && line.getProperty ("caption_en", {}).toString().endsWith ("texture rough")
+                       && line.getProperty ("untranslated", {}).getArray()->isEmpty() && audioAfter == audioBefore,
+                   "after the translations are added, adding the recording again updates the captions and leaves the audio alone");
+        }
+
+        // ---- the main window and the config folder
+        {
+            auto source = std::make_shared<AudioData>();
+            source->sampleRate = 48000.0;
+            source->bitsPerSample = 24;
+            source->buffer.setSize (1, 48000 * 3);
+            source->buffer.clear();
+            source->file = base.getChildFile ("w.wav");
+
+            MainComponent main;
+            main.testLoadAudio (source);
+            check (main.testDictionary().getFile() == main.testCatalog().getDirectory().getChildFile ("dictionary.csv"), "the dictionary lives in the config folder, next to catalog.xlsx");
+
+            auto& cycles = main.testCyclesMutable();
+            cycles.setTypeName (0, "Hit");
+            cycles.add (1000, 20000, 0);
+            cycles.add (30000, 50000, 0);
+            cycles.setAttributes (0, ja ("strength=strong tool=かなづち 3m"));
+            cycles.setAttributes (1, ja ("tool=かなづち material=wood odd=変"));
+            cycles.setNg ({ 1 }, true);
+            const auto missing = main.testUntranslated();
+            check (missing.size() == 1 && missing.contains (ja ("かなづち")), "the words of this recording without a translation are found (NG cycles and numbers do not count)");
+        }
+
+        {
+            const auto from = base.getChildFile ("old_config"), to = base.getChildFile ("new_config");
+            from.createDirectory();
+            from.getChildFile ("dictionary.csv").replaceWithText ("English,Japanese,Note\r\nfoo,bar,\r\n");
+            check (Catalog::copyConfigFiles (from, to) == 1 && to.getChildFile ("dictionary.csv").existsAsFile(), "moving to another config folder copies the dictionary too");
+            to.getChildFile ("dictionary.csv").replaceWithText ("English,Japanese,Note\r\nmine,mine2,\r\n");
+            check (Catalog::copyConfigFiles (from, to) == 0 && to.getChildFile ("dictionary.csv").loadFileAsString().contains ("mine"), "and never over an existing one");
         }
 
         return ok;

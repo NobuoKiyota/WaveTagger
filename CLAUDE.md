@@ -81,3 +81,11 @@
 - 今は**開いている録音**からの追加だけ。Raw フォルダ全体から (WAV の `wtag` を読んで同じ処理) は未実装
 - 検証: `--selftest-dataset` (26 項目)
 - **修正**: Type の日本語シード (`Catalog.cpp` の `seedTypes`) が `const char*` のまま `String` になり Latin-1 として読まれて文字化けしていた (新しく作った `types.csv` / `catalog.xlsx` の Japanese 列)。`String::fromUTF8` に修正済み。**修正前に作られた設定フォルダの Types シートは文字化けしたまま**なので、Excel で開いて確認すること (カテゴリは元から正常)
+
+## 翻訳辞書 (Phase 7, `Core/Dictionary`, `UI/DictionaryWindow`)
+- 属性の語 (key / 値 / 単語) の日英を対応づけ、データセットの英語・日本語キャプションとタグをそろえる。`Export ▾ → 翻訳辞書...` で開く (一覧 / 絞り込み / 追加・更新 / ユーザーの訳の削除 / 「この録音の未訳語...」)
+- 中身: 内蔵語彙 (約 120 語: 属性の key・代表値・素材・道具・マイクなど) + **設定フォルダ (共通) の `dictionary.csv`** (`English,Japanese,Note`、UTF-8 BOM、Excel で編集可、Shift-JIS の CSV も読める)。ユーザーの訳が内蔵より優先。同じ英語に複数の日本語があれば 英→日 は最初の行、日→英 はどの行からでも引ける。保存は一時ファイル経由 (Excel が開いている等で失敗しても元は壊れない)、ファイルが変われば自動で読み直す (`reloadIfChanged`)、設定フォルダの移動でコピーされる
+- 照合は語全体の完全一致 (前後の空白・大小・全角英数は無視)。**語の一部からの推測はしない** (`cardboard box` を分解しない。足りなければ未訳として知らせる)。数字だけ・数字で始まる量 (`3m`, `10cm`, `-3.5dB`) は言語に関係ないので対象外 (`isNeutral`)。かな/漢字を含めば日本語 (`isJapanese`)
+- データセット (`addToDataset(..., &dictionary)`): `caption_en/ja`・`tags_en/ja` の属性の語をそれぞれの言語にそろえる。`attributes` は打ったまま + `attributes_en` / `attributes_ja`。訳が無い語は両側とも原文のままで、行の `untranslated` と `DatasetResult::untranslated` に残る。**訳を足してからもう一度追加すると、音声はそのままでキャプションだけ更新される**。書き出しジョブには辞書のスナップショット (コピー) を渡す (ウィンドウでの編集と競合しない)
+- `Core/Csv` (`parseCsv` / `toCsvLine` / `readCsvRows` / `csvBytes`): `Catalog.cpp` から切り出して共用 (動作は同じ)
+- 検証: `--selftest-dictionary` (34 項目)。画面確認: `--snapshot-dictionary <out.png>`

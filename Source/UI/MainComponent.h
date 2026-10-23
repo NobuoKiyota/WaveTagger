@@ -10,6 +10,7 @@
 #include "Core/CategoryProfiles.h"
 #include "Core/ConditioningPreview.h"
 #include "Core/Dataset.h"
+#include "Core/Dictionary.h"
 #include "Core/Exporter.h"
 #include "Core/CycleModel.h"
 #include "Core/EmbeddedState.h"
@@ -17,6 +18,7 @@
 #include "Core/PlaybackEngine.h"
 #include "Core/SpectrogramRenderer.h"
 #include "ConditioningPanel.h"
+#include "DictionaryWindow.h"
 #include "CycleList.h"
 #include "InputMap.h"
 #include "InboxWindow.h"
@@ -72,6 +74,8 @@ public:
     juce::String testSummary() const { return conditioningSummary(); }
     void testRefreshListening() { refreshListening(); }
     void testSelectRows (const juce::Array<int>& rows) { list.selectRows (rows); }
+    Dictionary& testDictionary() { return dictionary; }
+    juce::StringArray testUntranslated() const { return untranslatedWords(); }
     std::vector<DatasetClip> testDatasetClips (int& untyped) const { return collectDatasetClips (untyped); }
     void testSetCursor (juce::int64 sample) { view.setCursor (sample); }
     std::vector<ExportItem> testExportItems (int& untyped, int& ng) const { return collectExportItems (untyped, ng); }
@@ -112,6 +116,10 @@ private:
     void startDatasetExport();
     void chooseDatasetFolder (std::function<void()> then);
     void showExportMenu();
+    void showDictionary();
+    /** Attribute words of this recording (keys and values) that the dictionary cannot translate. */
+    juce::StringArray untranslatedWords() const;
+    void useDictionaryFolder();
     juce::Array<int> targetRows() const;
     void rateRows (int stars);
     void toggleNgRows();
@@ -189,6 +197,8 @@ private:
     LibraryIndex libraryIndex;
     std::unique_ptr<LibraryWindow> libraryWindow;
     AudioDataPtr audio;
+    Dictionary dictionary;
+    std::unique_ptr<DictionaryWindow> dictionaryWindow;
     ConditionSettings conditioning;
     ConditioningPreview conditionPreview;
     std::unique_ptr<ConditioningWindow> conditioningWindow;

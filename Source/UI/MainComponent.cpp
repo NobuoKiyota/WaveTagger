@@ -3,6 +3,7 @@
 #include "AttributeEditor.h"
 #include "Core/Attributes.h"
 #include "Core/Conditioning.h"
+#include "Core/Dictionary.h"
 #include "Core/Exporter.h"
 #include "Core/WavChunks.h"
 #include "Core/Categories.h"
@@ -238,6 +239,7 @@ MainComponent::~MainComponent()
     libraryWindow = nullptr;
     organizerWindow = nullptr;
     conditioningWindow = nullptr;
+    dictionaryWindow = nullptr;
     conditionPreview.onChanged = nullptr;
     loader.removeAllJobs (true, 10000);
     spectrogram.onNewImage = nullptr;
@@ -263,6 +265,7 @@ void MainComponent::loadSettings()
     // Category / Type workbook + shared preferences folder: remembered once chosen so it never silently moves
     const auto savedDir = s.getProperty ("configDir", "").toString();
     catalog.setDirectory (savedDir.isNotEmpty() ? juce::File (savedDir) : Catalog::defaultDirectory());
+    useDictionaryFolder();
 
     exportDir = juce::File (s.getProperty ("exportDir", "").toString());
     rawDir = juce::File (s.getProperty ("rawDir", "").toString());
@@ -747,7 +750,11 @@ void MainComponent::stopPlayback()
 void MainComponent::onVBlank()
 {
     if (++frameCounter % 120 == 0)
+    {
         catalog.reloadIfChanged();
+        if (dictionary.reloadIfChanged() && dictionaryWindow != nullptr)
+            dictionaryWindow->getPanel().refresh();
+    }
 
     suggestTick();
 
@@ -937,6 +944,7 @@ juce::String MainComponent::changeConfigFolder (const juce::File& newDir)
     const auto copied = Catalog::copyConfigFiles (catalog.getDirectory(), newDir);
 
     catalog.setDirectory (newDir);
+    useDictionaryFolder();
     prefsLoadFailed = false;
     prefsBackedUp = false;
 
@@ -1188,6 +1196,7 @@ void MainComponent::showExportMenu()
     menu.addItem (2, WT_U8 ("データセットに追加   ") + keyMap.describe (Action::ExportDataset), audio != nullptr);
     menu.addSeparator();
     menu.addItem (3, WT_U8 ("データセットの場所を変更...") + (datasetDir.isDirectory() ? "   (" + datasetDir.getFullPathName() + ")" : juce::String()));
+    menu.addItem (4, WT_U8 ("翻訳辞書..."));
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&exportButton), [safe] (int r) {
@@ -1199,7 +1208,49 @@ void MainComponent::showExportMenu()
             safe->startDatasetExport();
         else if (r == 3)
             safe->chooseDatasetFolder ({});
+        else if (r == 4)
+            safe->showDictionary();
     });
+}
+
+void MainComponent::useDictionaryFolder()
+{
+    dictionary.setFile (catalog.getDirectory().getChildFile ("dictionary.csv"));
+}
+
+void MainComponent::showDictionary()
+{
+    if (dictionaryWindow == nullptr)
+    {
+        DictionaryPanel::Hooks hooks;
+        hooks.untranslated = [this] { return untranslatedWords(); };
+        dictionaryWindow = std::make_unique<DictionaryWindow> (dictionary, std::move (hooks));
+    }
+
+    dictionaryWindow->getPanel().refresh();
+    dictionaryWindow->setVisible (true);
+    dictionaryWindow->toFront (true);
+}
+
+juce::StringArray MainComponent::untranslatedWords() const
+{
+    juce::StringArray words;
+    const auto consider = [&] (const juce::String& word) {
+        if (word.isEmpty() || Dictionary::isNeutral (word))
+            return;
+        const auto found = Dictionary::isJapanese (word) ? dictionary.toEnglish (word) : dictionary.toJapanese (word);
+        if (! found)
+            words.addIfNotAlreadyThere (word, true);
+    };
+
+    for (int i = 0; i < cycles.size(); ++i)
+        if (cycles[i].type >= 0 && ! cycles[i].ng)
+            for (const auto& t : parseAttributes (cycles[i].attributes))
+            {
+                consider (t.key);
+                consider (t.value);
+            }
+    return words;
 }
 
 std::vector<DatasetClip> MainComponent::collectDatasetClips (int& untyped) const
@@ -1289,8 +1340,10 @@ void MainComponent::startDatasetExport()
     const auto folder = datasetDir;
     const auto options = conditioning.options;
     const auto summary = conditioningSummary();
-    loader.addJob ([safe, data, clips, folder, options, summary, untyped] {
-        const auto result = addToDataset (*data, clips, folder, options, JUCE_APPLICATION_VERSION_STRING);
+    dictionary.reloadIfChanged();
+    const auto words = std::make_shared<Dictionary> (dictionary); // a snapshot: the window may edit the real one meanwhile
+    loader.addJob ([safe, data, clips, folder, options, summary, untyped, words] {
+        const auto result = addToDataset (*data, clips, folder, options, JUCE_APPLICATION_VERSION_STRING, words.get());
         juce::MessageManager::callAsync ([safe, result, folder, options, summary, untyped] {
             juce::String msg = WT_U8 ("データセットに追加しました\n") + folder.getFullPathName() + "\n\n"
                                + WT_U8 ("新規 ") + juce::String (result.added) + WT_U8 (" 件 / 更新 ") + juce::String (result.updated)
@@ -1301,6 +1354,15 @@ void MainComponent::startDatasetExport()
                 msg += "\n\n" + juce::String (untyped) + WT_U8 (" 件は未分類のため追加していません");
             if (result.skippedNg > 0)
                 msg += "\n" + juce::String (result.skippedNg) + WT_U8 (" 件は NG のため追加していません");
+            if (! result.untranslated.isEmpty())
+            {
+                juce::StringArray first;
+                for (int i = 0; i < juce::jmin (8, result.untranslated.size()); ++i)
+                    first.add (result.untranslated[i]);
+                msg += "\n\n" + juce::String (result.untranslated.size()) + WT_U8 (" 語は翻訳辞書に訳がありません (原文のまま入っています): ")
+                       + first.joinIntoString (", ") + (result.untranslated.size() > 8 ? " ..." : "")
+                       + WT_U8 ("\n「Export ▾ → 翻訳辞書...」で足して、もう一度追加すると、キャプションだけ更新されます");
+            }
             if (! result.errors.isEmpty())
                 msg += "\n\n" + juce::String (result.errors.size()) + WT_U8 (" 件でエラー:\n") + result.errors.joinIntoString ("\n");
             juce::AlertWindow::showMessageBoxAsync (result.errors.isEmpty() ? juce::MessageBoxIconType::InfoIcon : juce::MessageBoxIconType::WarningIcon,

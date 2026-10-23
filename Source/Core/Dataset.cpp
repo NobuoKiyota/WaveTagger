@@ -15,11 +15,43 @@ juce::String join (const juce::StringArray& parts, const juce::String& separator
     return parts.joinIntoString (separator);
 }
 
-juce::StringArray attributeWords (const juce::String& attributes, const juce::String& keyValueSeparator)
+/** One typed word in both languages. `missing`: the dictionary was asked and has no translation. */
+struct Bilingual
+{
+    juce::String en, ja;
+    bool missing = false;
+};
+
+Bilingual bilingual (const juce::String& word, const Dictionary* dictionary)
+{
+    if (dictionary == nullptr || word.isEmpty() || Dictionary::isNeutral (word))
+        return { word, word, false };
+
+    if (Dictionary::isJapanese (word))
+    {
+        const auto en = dictionary->toEnglish (word);
+        return { en ? *en : word, word, ! en };
+    }
+
+    const auto ja = dictionary->toJapanese (word);
+    return { word, ja ? *ja : word, ! ja };
+}
+
+juce::StringArray attributeWords (const juce::String& attributes, bool japanese, const Dictionary* dictionary)
 {
     juce::StringArray words;
     for (const auto& t : parseAttributes (attributes))
-        words.add (t.key.isEmpty() ? t.value : t.key + keyValueSeparator + t.value);
+    {
+        const auto value = bilingual (t.value, dictionary);
+        if (t.key.isEmpty())
+        {
+            words.add (japanese ? value.ja : value.en);
+            continue;
+        }
+
+        const auto key = bilingual (t.key, dictionary);
+        words.add (japanese ? key.ja + " " + value.ja : key.en + " " + value.en);
+    }
     return words;
 }
 
@@ -31,7 +63,7 @@ juce::var tagArray (const juce::StringArray& tags)
     return out;
 }
 
-juce::StringArray tagsFor (const DatasetClip& c, bool japanese)
+juce::StringArray tagsFor (const DatasetClip& c, bool japanese, const Dictionary* dictionary)
 {
     juce::StringArray tags;
     const auto add = [&tags] (const juce::String& t) {
@@ -43,31 +75,55 @@ juce::StringArray tagsFor (const DatasetClip& c, bool japanese)
     add (japanese && c.categoryJa.isNotEmpty() ? c.categoryJa : c.category.toLowerCase());
     add (japanese && c.typeJa.isNotEmpty() ? c.typeJa : c.type.toLowerCase());
     for (const auto& t : parseAttributes (c.attributes))
-        add (t.value);
+    {
+        const auto value = bilingual (t.value, dictionary);
+        add (japanese ? value.ja : value.en);
+    }
     return tags;
 }
 
 /** The metadata fields that follow the labelling (they can change after the clip was first added). */
-void setLabelFields (juce::DynamicObject& o, const DatasetClip& c)
+void setLabelFields (juce::DynamicObject& o, const DatasetClip& c, const Dictionary* dictionary, juce::StringArray& untranslated)
 {
     o.setProperty ("category", c.category);
     o.setProperty ("type", c.type);
-    o.setProperty ("caption_en", datasetCaptionEn (c));
-    o.setProperty ("caption_ja", datasetCaptionJa (c));
-    o.setProperty ("tags_en", tagArray (tagsFor (c, false)));
-    o.setProperty ("tags_ja", tagArray (tagsFor (c, true)));
+    o.setProperty ("caption_en", datasetCaptionEn (c, dictionary));
+    o.setProperty ("caption_ja", datasetCaptionJa (c, dictionary));
+    o.setProperty ("tags_en", tagArray (tagsFor (c, false, dictionary)));
+    o.setProperty ("tags_ja", tagArray (tagsFor (c, true, dictionary)));
 
+    // as typed, and in each language
     auto* attrs = new juce::DynamicObject();
+    auto* attrsEn = new juce::DynamicObject();
+    auto* attrsJa = new juce::DynamicObject();
     juce::Array<juce::var> freeTags;
+    juce::StringArray missing;
     for (const auto& t : parseAttributes (c.attributes))
     {
+        const auto value = bilingual (t.value, dictionary);
+        if (value.missing)
+            missing.addIfNotAlreadyThere (t.value);
+
         if (t.key.isEmpty())
+        {
             freeTags.add (t.value);
-        else
-            attrs->setProperty (t.key, t.value);
+            continue;
+        }
+
+        const auto key = bilingual (t.key, dictionary);
+        if (key.missing)
+            missing.addIfNotAlreadyThere (t.key);
+
+        attrs->setProperty (t.key, t.value);
+        attrsEn->setProperty (key.en, value.en);
+        attrsJa->setProperty (key.ja, value.ja);
     }
     o.setProperty ("attributes", juce::var (attrs));
+    o.setProperty ("attributes_en", juce::var (attrsEn));
+    o.setProperty ("attributes_ja", juce::var (attrsJa));
     o.setProperty ("free_tags", freeTags);
+    o.setProperty ("untranslated", tagArray (missing));
+    untranslated.addArray (missing);
     o.setProperty ("rating", c.rating);
     o.setProperty ("ng", c.ng);
 }
@@ -96,27 +152,27 @@ juce::String datasetClipId (const juce::String& sourceFile, juce::int64 sourceSi
            + juce::String::toHexString ((juce::int64) fnv (0x84222325cbf29ce4ULL)).paddedLeft ('0', 16);
 }
 
-juce::String datasetCaptionEn (const DatasetClip& c)
+juce::String datasetCaptionEn (const DatasetClip& c, const Dictionary* dictionary)
 {
     juce::StringArray parts;
     parts.add (c.type + (c.category.isNotEmpty() ? " (" + c.category + ")" : juce::String()));
-    parts.addArray (attributeWords (c.attributes, " "));
+    parts.addArray (attributeWords (c.attributes, false, dictionary));
     return join (parts, ", ");
 }
 
-juce::String datasetCaptionJa (const DatasetClip& c)
+juce::String datasetCaptionJa (const DatasetClip& c, const Dictionary* dictionary)
 {
     const auto type = c.typeJa.isNotEmpty() ? c.typeJa : c.type;
     const auto category = c.categoryJa.isNotEmpty() ? c.categoryJa : c.category;
 
     juce::StringArray parts;
     parts.add (type + (category.isNotEmpty() ? " (" + category + ")" : juce::String()));
-    parts.addArray (attributeWords (c.attributes, " "));
+    parts.addArray (attributeWords (c.attributes, true, dictionary));
     return join (parts, juce::String::fromUTF8 ("、"));
 }
 
 DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetClip>& clips, const juce::File& folder,
-                            const ConditionOptions& conditioning, const juce::String& appVersion)
+                            const ConditionOptions& conditioning, const juce::String& appVersion, const Dictionary* dictionary)
 {
     DatasetResult result;
     if (! folder.createDirectory().wasOk())
@@ -181,7 +237,7 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
             const auto wasNg = (bool) line.value.getProperty ("ng", false);
 
             auto* o = line.value.getDynamicObject();
-            setLabelFields (*o, clip);
+            setLabelFields (*o, clip, dictionary, result.untranslated);
 
             const auto labelChanged = lineOf (line.value) != before;
             if (clip.ng != wasNg && clip.ng)
@@ -246,7 +302,7 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
             o->setProperty ("original", juce::var (original));
 
             o->setProperty ("name", p.clip.name);
-            setLabelFields (*o, p.clip);
+            setLabelFields (*o, p.clip, dictionary, result.untranslated);
             o->setProperty ("duration", (double) (p.clip.end - p.clip.start) / audio.sampleRate);
             o->setProperty ("sampleRate", audio.sampleRate);
             o->setProperty ("channels", audio.getNumChannels());
@@ -264,6 +320,8 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
             changed = true;
         }
     }
+
+    result.untranslated.removeDuplicates (true);
 
     if (changed)
     {
