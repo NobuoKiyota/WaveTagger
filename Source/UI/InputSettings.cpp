@@ -231,7 +231,7 @@ void FolderSettingsComponent::resized()
     status.setBounds (r.removeFromTop (60));
 }
 
-InputSettingsComponent::InputSettingsComponent (WheelMap& wheel, KeyMap& keys, std::function<void()> onChanged,
+InputSettingsComponent::InputSettingsComponent (WheelMap& wheel, KeyMap& keys, juce::AudioDeviceManager& devices, std::function<void()> onChanged,
                                                 std::function<juce::File()> getFolder, std::function<juce::String (const juce::File&)> onChooseFolder)
     : juce::TabbedComponent (juce::TabbedButtonBar::TabsAtTop)
 {
@@ -240,6 +240,9 @@ InputSettingsComponent::InputSettingsComponent (WheelMap& wheel, KeyMap& keys, s
     addTab (WT_U8 ("マウスホイール"), theme::panel, new MouseSettingsComponent (wheel, onChanged), true);
     addTab (WT_U8 ("ショートカットキー"), theme::panel, new ShortcutSettingsComponent (keys, onChanged), true);
     addTab (WT_U8 ("設定フォルダ"), theme::panel, new FolderSettingsComponent (std::move (getFolder), std::move (onChooseFolder)), true);
+    auto* audioSettings = new juce::AudioDeviceSelectorComponent (devices, 0, 0, 1, 2, false, false, true, false);
+    audioSettings->setSize (520, 360);
+    addTab (WT_U8 ("オーディオ"), theme::panel, audioSettings, true);
     setSize (800, 580);
 }
 } // namespace wt

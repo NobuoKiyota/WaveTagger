@@ -2,6 +2,10 @@
 
 #include "Core/AutoSplit.h"
 #include "Core/Catalog.h"
+#include "Core/FeatureStore.h"
+#include "Core/InboxProcessor.h"
+#include "Core/InboxQueue.h"
+#include "Core/CategoryProfiles.h"
 #include "Core/CycleModel.h"
 #include "Core/EmbeddedState.h"
 #include "Core/LibraryIndex.h"
@@ -9,7 +13,9 @@
 #include "Core/SpectrogramRenderer.h"
 #include "CycleList.h"
 #include "InputMap.h"
+#include "InboxWindow.h"
 #include "InputSettings.h"
+#include "OrganizerWindow.h"
 #include "KeyMap.h"
 #include "LibraryPanel.h"
 #include "OverviewBar.h"
@@ -41,6 +47,8 @@ public:
     juce::String testChangeFolder (const juce::File& dir) { return changeConfigFolder (dir); }
     const Catalog& testCatalog() const { return catalog; }
     int testApplyEmbedded (const WtagData& d) { return applyEmbeddedState (d); }
+    void testChooseCategoryNoDialog (const juce::String& name) { catalog.noteUsed (name); applyCategoryProfile (name, resolveCategoryProfile (name)); }
+    const CategoryProfiles& testProfiles() const { return profiles; }
     CycleModel& testCyclesMutable() { return cycles; }
     const CycleModel& testCycles() const { return cycles; }
 
@@ -79,6 +87,17 @@ private:
     void afterExport (const juce::File& destFolder);
     void showInputSettings();
     void applySharedPreferences (const juce::var& prefs);
+    void chooseCategory (const juce::String& name);
+    void applyCategoryProfile (const juce::String& name, const CategoryProfile& profile);
+    CategoryProfile resolveCategoryProfile (const juce::String& name) const;
+    void showInbox();
+    void showOrganizer();
+    void configureInbox();
+    void updateInboxBadge();
+    void chooseInboxFolder (std::function<void()> then);
+    void setInboxWatching (bool on);
+    void handleInboxOutcome (const InboxOutcome& outcome);
+    InboxPanel::Hooks makeInboxHooks();
     void doImportMarkers();
     void showMarkersMenu();
     void saveMarkersToWav();
@@ -99,17 +118,24 @@ private:
     void saveNow();
 
     juce::AudioFormatManager formats;
+    InboxWatcher inboxWatcher { formats };
+    InboxQueue inboxQueue;
+    std::unique_ptr<InboxWindow> inboxWindow;
+    FeatureStore featureStore { FeatureStore::defaultFile() };
+    std::unique_ptr<OrganizerWindow> organizerWindow;
     ViewState view;
     SpectrogramRenderer spectrogram;
     PlaybackEngine playback;
     CycleModel cycles;
     Catalog catalog;
+    CategoryProfiles profiles;
+    bool applyingProfile = false;
     KeyMap keyMap;
     LibraryIndex libraryIndex;
     std::unique_ptr<LibraryWindow> libraryWindow;
     AudioDataPtr audio;
 
-    juce::TextButton openButton { "Open" }, audioButton { "Audio..." }, inputButton { "Input..." };
+    juce::TextButton openButton { "Open" }, inboxButton { "Inbox" }, inputButton { "Settings..." };
     juce::TextButton importButton { "Import markers" }, splitButton { "Auto split" }, exportButton { "Export..." }, libraryButton { "Library" };
     juce::ToggleButton autoPreviewToggle { "Auto preview" }, continueToggle { "Continue numbering" };
     juce::Label fileLabel, blendLabel, floorLabel, hintLabel;
@@ -127,7 +153,9 @@ private:
     std::unique_ptr<juce::VBlankAttachment> vblank;
     juce::String statusText;
     bool wasPlaying = false;
-    juce::File snapshotOutput, exportDir, rawDir;
+    juce::File snapshotOutput, exportDir, rawDir, inboxDir, organizedDir;
+    bool inboxWatch = false;
+    juce::String backlogDecidedFor;
     bool embedding = false;
     int saveGeneration = 0;
     juce::String lastInfoKey;

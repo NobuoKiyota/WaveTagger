@@ -9,6 +9,7 @@ struct CategoryInfo
     juce::String name; // folder / file-name part, English
     juce::String jp;   // Japanese alias shown next to it
     juce::String note;
+    juce::String prefix; // optional file-name prefix for this Category (empty = use the Category name in Title case)
 };
 
 struct TypeInfo

@@ -1,0 +1,790 @@
+#include "OrganizerWindow.h"
+#include "CategoryPicker.h"
+#include "Core/AudioData.h"
+#include "Core/Xlsx.h"
+#include "Theme.h"
+#include "Util/Text.h"
+
+namespace wt
+{
+namespace
+{
+const char* const audioPatterns = "*.wav;*.flac;*.aif;*.aiff;*.mp3;*.ogg";
+
+juce::Colour groupColour (int g)
+{
+    static const juce::uint32 colours[] = { 0xff4fa3e0, 0xffe0894f, 0xff6cc070, 0xffc46bd1, 0xffe0cf4f, 0xff4fd1c4, 0xffe05a6c, 0xff9a8be0 };
+    return juce::Colour (colours[(size_t) g % std::size (colours)]);
+}
+
+juce::String formatSeconds (double s) { return juce::String (s, s < 10.0 ? 2 : 1) + " s"; }
+} // namespace
+
+/** A tab body whose children are placed by a lambda (keeps the layout code next to the widgets it concerns). */
+class OrganizerPanel::LayoutTab : public juce::Component
+{
+public:
+    std::function<void()> layout;
+    void paint (juce::Graphics& g) override { g.fillAll (theme::panel); }
+    void resized() override { if (layout) layout(); }
+};
+
+class OrganizerPanel::GroupsModel : public juce::ListBoxModel
+{
+public:
+    explicit GroupsModel (OrganizerPanel& o) : owner (o) {}
+
+    int getNumRows() override { return owner.groupCount; }
+
+    void paintListBoxItem (int row, juce::Graphics& g, int width, int height, bool selected) override
+    {
+        if (row < 0 || row >= owner.groupCount)
+            return;
+
+        g.fillAll (selected ? theme::accent.withAlpha (0.32f) : (row % 2 == 0 ? theme::background : theme::background.brighter (0.03f)));
+        g.setColour (groupColour (row));
+        g.fillRect (0, 3, 5, height - 6);
+
+        // what the members have been assigned so far
+        std::map<juce::String, int> tally;
+        int assigned = 0;
+        const auto roots = owner.hooks.getRoots();
+        for (auto i : owner.groupMembers[(size_t) row])
+            if (const auto* e = owner.db.find (ReclassDb::makeKey (roots, owner.files[(size_t) i])))
+            {
+                ++tally[e->category + " / " + e->type];
+                ++assigned;
+            }
+
+        juce::String label;
+        auto colour = theme::textDim;
+        if (! tally.empty())
+        {
+            const auto best = std::max_element (tally.begin(), tally.end(), [] (const auto& a, const auto& b) { return a.second < b.second; });
+            label = best->first + (assigned < (int) owner.groupMembers[(size_t) row].size() ? "  (" + juce::String (assigned) + "/" + juce::String ((int) owner.groupMembers[(size_t) row].size()) + ")" : juce::String());
+            colour = theme::text;
+        }
+        else
+        {
+            label = WT_U8 ("未割り当て");
+        }
+
+        g.setColour (theme::text);
+        g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+        g.drawText ("G" + juce::String (row + 1) + "  (" + juce::String ((int) owner.groupMembers[(size_t) row].size()) + ")", 14, 0, 110, height, juce::Justification::centredLeft);
+        g.setColour (colour);
+        g.setFont (juce::FontOptions (13.0f));
+        g.drawText (label, 124, 0, width - 130, height, juce::Justification::centredLeft, true);
+    }
+
+    void selectedRowsChanged (int row) override { owner.selectGroup (row); }
+
+private:
+    OrganizerPanel& owner;
+};
+
+class OrganizerPanel::FilesModel : public juce::TableListBoxModel
+{
+public:
+    explicit FilesModel (OrganizerPanel& o) : owner (o) {}
+
+    int getNumRows() override
+    {
+        return owner.currentGroup >= 0 && owner.currentGroup < owner.groupCount ? (int) owner.groupMembers[(size_t) owner.currentGroup].size() : 0;
+    }
+
+    void paintRowBackground (juce::Graphics& g, int row, int, int, bool selected) override
+    {
+        g.fillAll (selected ? theme::accent.withAlpha (0.32f) : (row % 2 == 0 ? theme::background : theme::background.brighter (0.03f)));
+    }
+
+    void paintCell (juce::Graphics& g, int row, int column, int width, int height, bool) override
+    {
+        if (row >= getNumRows())
+            return;
+
+        const auto fileIndex = owner.groupMembers[(size_t) owner.currentGroup][(size_t) row];
+        const auto& file = owner.files[(size_t) fileIndex];
+        juce::String text;
+        auto colour = theme::text;
+
+        switch (column)
+        {
+            case 1: text = file.getFileName(); break;
+            case 2:
+                if (const auto* r = owner.store.find (file))
+                    text = formatSeconds (std::pow (10.0, (double) r->v[45]) - 0.01);
+                colour = theme::textDim;
+                break;
+            case 3:
+                if (const auto* e = owner.db.find (ReclassDb::makeKey (owner.hooks.getRoots(), file)))
+                    text = e->category + " / " + e->type;
+                colour = theme::accent.brighter (0.4f);
+                break;
+            case 4: text = juce::String (owner.distance[(size_t) fileIndex], 2); colour = theme::textDim; break;
+            default: return;
+        }
+
+        g.setColour (colour);
+        g.setFont (juce::FontOptions ("Meiryo UI", 13.0f, juce::Font::plain));
+        g.drawText (text, 6, 0, width - 10, height, juce::Justification::centredLeft, true);
+    }
+
+    void selectedRowsChanged (int row) override
+    {
+        if (row >= 0 && row < getNumRows() && owner.filesTable.getNumSelectedRows() == 1)
+            owner.audition (owner.files[(size_t) owner.groupMembers[(size_t) owner.currentGroup][(size_t) row]]);
+    }
+
+private:
+    OrganizerPanel& owner;
+};
+
+//==============================================================================
+OrganizerPanel::OrganizerPanel (Catalog& c, FeatureStore& s, juce::AudioFormatManager& f, OrganizerHooks h)
+    : catalog (c), store (s), formats (f), hooks (std::move (h))
+{
+    db.load (catalog.getDirectory().getChildFile ("reclass.json"));
+
+    groupsModel = std::make_unique<GroupsModel> (*this);
+    filesModel = std::make_unique<FilesModel> (*this);
+    groupsList.setModel (groupsModel.get());
+    groupsList.setRowHeight (28);
+    groupsList.setColour (juce::ListBox::backgroundColourId, theme::background);
+    groupsList.setColour (juce::ListBox::outlineColourId, theme::outline);
+    groupsList.setOutlineThickness (1);
+
+    filesTable.setModel (filesModel.get());
+    filesTable.setMultipleSelectionEnabled (true);
+    filesTable.setRowHeight (24);
+    filesTable.setColour (juce::ListBox::backgroundColourId, theme::background);
+    filesTable.setColour (juce::ListBox::outlineColourId, theme::outline);
+    filesTable.setOutlineThickness (1);
+    auto& header = filesTable.getHeader();
+    header.setColour (juce::TableHeaderComponent::backgroundColourId, theme::panel);
+    header.setColour (juce::TableHeaderComponent::textColourId, theme::textDim);
+    header.addColumn (WT_U8 ("ファイル名"), 1, 260, 120, 600, juce::TableHeaderComponent::notSortable);
+    header.addColumn (WT_U8 ("長さ"), 2, 70, 50, 120, juce::TableHeaderComponent::notSortable);
+    header.addColumn (WT_U8 ("割り当て済み"), 3, 180, 90, 400, juce::TableHeaderComponent::notSortable);
+    header.addColumn (WT_U8 ("典型度(小さいほど代表的)"), 4, 90, 60, 200, juce::TableHeaderComponent::notSortable);
+    header.setStretchToFitActive (true);
+
+    groupingTab = std::make_unique<LayoutTab>();
+    outputTab = std::make_unique<LayoutTab>();
+
+    // ---- grouping tab widgets
+    folderButton.setButtonText (WT_U8 ("フォルダを選ぶ..."));
+    analyzeButton.setButtonText (WT_U8 ("① 音を解析"));
+    autoKButton.setButtonText (WT_U8 ("おすすめ"));
+    groupButton.setButtonText (WT_U8 ("② グループ分け"));
+    categoryButton.setButtonText ("Category: (" + juce::String (WT_U8 ("未選択")) + ") " + WT_U8 ("▾"));
+    typeMenuButton.setButtonText (WT_U8 ("Type 候補 ▾"));
+    assignGroupButton.setButtonText (WT_U8 ("このグループ全体に割り当て"));
+    assignSelectedButton.setButtonText (WT_U8 ("選んだファイルだけに割り当て"));
+    unassignButton.setButtonText (WT_U8 ("選んだファイルの割り当てを解除"));
+    moveButton.setButtonText (WT_U8 ("選んだファイルを別グループへ ▾"));
+
+    folderLabel.setColour (juce::Label::textColourId, theme::text);
+    statusLabel.setColour (juce::Label::textColourId, theme::textDim);
+    kLabel.setText (WT_U8 ("グループ数"), juce::dontSendNotification);
+    kLabel.setColour (juce::Label::textColourId, theme::textDim);
+    categoryLabel.setText ("Type:", juce::dontSendNotification);
+    categoryLabel.setColour (juce::Label::textColourId, theme::textDim);
+
+    kSlider.setRange (2.0, 30.0, 1.0);
+    kSlider.setValue (3.0, juce::dontSendNotification);
+    kSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    kSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 40, 22);
+
+    typeEditor.setTextToShowWhenEmpty (WT_U8 ("Type 名 (英語、ファイル名に使います)"), theme::textDim);
+    typeEditor.setColour (juce::TextEditor::backgroundColourId, theme::panelLight);
+    typeEditor.setColour (juce::TextEditor::textColourId, theme::text);
+    typeEditor.setColour (juce::TextEditor::outlineColourId, theme::outline);
+
+    for (auto* comp : std::initializer_list<juce::Component*> { &folderLabel, &statusLabel, &kLabel, &categoryLabel, &folderButton, &analyzeButton,
+                                                                &autoKButton, &groupButton, &categoryButton, &typeMenuButton, &assignGroupButton,
+                                                                &assignSelectedButton, &unassignButton, &moveButton, &kSlider, &typeEditor, &groupsList, &filesTable })
+        groupingTab->addAndMakeVisible (comp);
+
+    folderButton.onClick = [this] { chooseFolder(); };
+    analyzeButton.onClick = [this] { startAnalysis(); };
+    autoKButton.onClick = [this] { suggestGroups(); };
+    groupButton.onClick = [this] { runGrouping(); };
+    categoryButton.onClick = [this] { pickCategory(); };
+    typeMenuButton.onClick = [this] { pickTypeFromMenu(); };
+    assignGroupButton.onClick = [this] {
+        if (currentGroup >= 0 && currentGroup < groupCount)
+        {
+            juce::Array<int> all;
+            for (auto i : groupMembers[(size_t) currentGroup])
+                all.add (i);
+            assign (all);
+        }
+    };
+    assignSelectedButton.onClick = [this] { assign (selectedFileIndices()); };
+    unassignButton.onClick = [this] { unassign (selectedFileIndices()); };
+    moveButton.onClick = [this] {
+        const auto selected = selectedFileIndices();
+        if (selected.isEmpty() || groupCount < 2)
+            return;
+
+        juce::PopupMenu menu;
+        for (int g = 0; g < groupCount; ++g)
+            menu.addItem (g + 1, "G" + juce::String (g + 1) + "  (" + juce::String ((int) groupMembers[(size_t) g].size()) + ")", g != currentGroup);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&moveButton), [this, selected] (int r) {
+            if (r > 0)
+                moveToGroup (selected, r - 1);
+        });
+    };
+
+    groupingTab->layout = [this] {
+        auto r = groupingTab->getLocalBounds().reduced (10, 8);
+
+        auto top = r.removeFromTop (30);
+        folderButton.setBounds (top.removeFromLeft (130));
+        top.removeFromLeft (8);
+        analyzeButton.setBounds (top.removeFromLeft (110));
+        top.removeFromLeft (8);
+        kLabel.setBounds (top.removeFromLeft (70));
+        kSlider.setBounds (top.removeFromLeft (190));
+        autoKButton.setBounds (top.removeFromLeft (80));
+        top.removeFromLeft (8);
+        groupButton.setBounds (top.removeFromLeft (130));
+
+        r.removeFromTop (4);
+        folderLabel.setBounds (r.removeFromTop (22));
+        statusLabel.setBounds (r.removeFromTop (22));
+        r.removeFromTop (4);
+
+        auto bottom = r.removeFromBottom (68);
+        auto row1 = bottom.removeFromTop (30);
+        categoryButton.setBounds (row1.removeFromLeft (230));
+        row1.removeFromLeft (8);
+        categoryLabel.setBounds (row1.removeFromLeft (44));
+        typeEditor.setBounds (row1.removeFromLeft (220));
+        row1.removeFromLeft (4);
+        typeMenuButton.setBounds (row1.removeFromLeft (110));
+        bottom.removeFromTop (6);
+        auto row2 = bottom.removeFromTop (30);
+        assignGroupButton.setBounds (row2.removeFromLeft (190));
+        row2.removeFromLeft (6);
+        assignSelectedButton.setBounds (row2.removeFromLeft (200));
+        row2.removeFromLeft (6);
+        unassignButton.setBounds (row2.removeFromLeft (230));
+        row2.removeFromLeft (6);
+        moveButton.setBounds (row2.removeFromLeft (250));
+
+        r.removeFromBottom (6);
+        groupsList.setBounds (r.removeFromLeft (juce::jmin (330, r.getWidth() / 3)));
+        r.removeFromLeft (8);
+        filesTable.setBounds (r);
+    };
+
+    // ---- output tab widgets
+    outputButton.setButtonText (WT_U8 ("出力先を変更..."));
+    previewButton.setButtonText (WT_U8 ("プレビュー"));
+    createButton.setButtonText (WT_U8 ("整理ビューを作成 (ハードリンク)"));
+    undoButton.setButtonText (WT_U8 ("作成したリンクを取り消す"));
+    excelButton.setButtonText (WT_U8 ("割り当てを Excel に書き出し"));
+    outputPath.setColour (juce::Label::textColourId, theme::text);
+    outputPath.setColour (juce::Label::backgroundColourId, theme::panelLight);
+    outputPath.setBorderSize ({ 4, 8, 4, 8 });
+    outputSummary.setColour (juce::Label::textColourId, theme::textDim);
+    outputSummary.setJustificationType (juce::Justification::topLeft);
+    planText.setMultiLine (true);
+    planText.setReadOnly (true);
+    planText.setFont (juce::FontOptions ("Consolas", 13.0f, juce::Font::plain));
+    planText.setColour (juce::TextEditor::backgroundColourId, theme::background);
+    planText.setColour (juce::TextEditor::textColourId, theme::text);
+    planText.setColour (juce::TextEditor::outlineColourId, theme::outline);
+
+    for (auto* comp : std::initializer_list<juce::Component*> { &outputPath, &outputSummary, &outputButton, &previewButton, &createButton, &undoButton, &excelButton, &planText })
+        outputTab->addAndMakeVisible (comp);
+
+    outputButton.onClick = [this] { chooseOutput(); };
+    previewButton.onClick = [this] { previewPlan(); };
+    createButton.onClick = [this] { createView(); };
+    undoButton.onClick = [this] { undoView(); };
+    excelButton.onClick = [this] { exportExcel(); };
+
+    outputTab->layout = [this] {
+        auto r = outputTab->getLocalBounds().reduced (12, 10);
+        outputSummary.setBounds (r.removeFromTop (64));
+        r.removeFromTop (4);
+        auto row = r.removeFromTop (30);
+        outputButton.setBounds (row.removeFromRight (150));
+        row.removeFromRight (6);
+        outputPath.setBounds (row);
+        r.removeFromTop (8);
+        row = r.removeFromTop (30);
+        previewButton.setBounds (row.removeFromLeft (110));
+        row.removeFromLeft (6);
+        createButton.setBounds (row.removeFromLeft (250));
+        row.removeFromLeft (6);
+        undoButton.setBounds (row.removeFromLeft (220));
+        row.removeFromLeft (6);
+        excelButton.setBounds (row.removeFromLeft (220));
+        r.removeFromTop (8);
+        planText.setBounds (r);
+    };
+
+    tabs.setTabBarDepth (32);
+    tabs.addTab (WT_U8 ("グループ分け"), theme::panel, groupingTab.get(), false);
+    tabs.addTab (WT_U8 ("整理ビュー (ハードリンク)"), theme::panel, outputTab.get(), false);
+    tabs.setColour (juce::TabbedComponent::backgroundColourId, theme::panel);
+    addAndMakeVisible (tabs);
+
+    tabs.getTabbedButtonBar().setCurrentTabIndex (0);
+    refreshGroups();
+    refreshOutput();
+    updateStatus();
+    startTimerHz (4);
+}
+
+OrganizerPanel::~OrganizerPanel()
+{
+    stopTimer();
+    tabs.clearTabs(); // the tab bodies are owned by this panel, so detach them before they are destroyed
+    analyzer.cancel();
+    groupsList.setModel (nullptr);
+    filesTable.setModel (nullptr);
+    jobs.removeAllJobs (true, 20000);
+}
+
+void OrganizerPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (theme::background);
+}
+
+void OrganizerPanel::resized()
+{
+    tabs.setBounds (getLocalBounds());
+}
+
+void OrganizerPanel::timerCallback()
+{
+    if (analyzer.isRunning())
+        updateStatus();
+}
+
+//==============================================================================
+void OrganizerPanel::chooseFolder()
+{
+    const auto roots = hooks.getRoots();
+    const auto start = folder.isDirectory() ? folder : (roots.isEmpty() ? juce::File() : juce::File (roots[0]));
+    chooser = std::make_unique<juce::FileChooser> (WT_U8 ("区分し直したいフォルダを選択 (読み取りのみ。中のファイルは変更しません)"), start);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, [this] (const juce::FileChooser& fc) {
+        const auto dir = fc.getResult();
+        if (dir.isDirectory())
+            loadFolder (dir);
+    });
+}
+
+void OrganizerPanel::loadFolder (const juce::File& dir)
+{
+    folder = dir;
+    files.clear();
+    for (const auto& item : juce::RangedDirectoryIterator (dir, true, audioPatterns, juce::File::findFiles))
+        files.push_back (item.getFile());
+    std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b) { return a.getFullPathName().compareIgnoreCase (b.getFullPathName()) < 0; });
+
+    assignment.assign (files.size(), -1);
+    distance.assign (files.size(), 0.0f);
+    groupMembers.clear();
+    groupCount = 0;
+    currentGroup = -1;
+
+    int analysed = 0;
+    for (const auto& f : files)
+        analysed += store.isCurrent (f) ? 1 : 0;
+    kSlider.setValue (juce::jlimit (2.0, 30.0, std::round (std::sqrt ((double) files.size() / 2.0))), juce::dontSendNotification);
+
+    folderLabel.setText (dir.getFullPathName() + "   (" + juce::String ((int) files.size()) + WT_U8 (" ファイル, 解析済み ") + juce::String (analysed) + ")", juce::dontSendNotification);
+    refreshGroups();
+    updateStatus();
+}
+
+void OrganizerPanel::startAnalysis()
+{
+    if (files.empty() || analyzer.isRunning())
+        return;
+
+    analyzer.onFinished = [this] {
+        updateStatus();
+        loadFolder (folder);
+    };
+    analyzer.start (files);
+    updateStatus();
+}
+
+void OrganizerPanel::updateStatus()
+{
+    if (analyzer.isRunning())
+        statusLabel.setText (WT_U8 ("解析中... ") + juce::String (analyzer.getDone()) + " / " + juce::String (analyzer.getTotal()), juce::dontSendNotification);
+    else if (files.empty())
+        statusLabel.setText (WT_U8 ("フォルダを選んでください。選んだフォルダの音を、似ているもの同士でグループにまとめます。"), juce::dontSendNotification);
+    else if (groupCount == 0)
+        statusLabel.setText (WT_U8 ("① 音を解析 → ② グループ分け の順に進めます。解析結果は保存され、途中で止めても続きから再開できます。"), juce::dontSendNotification);
+    else
+        statusLabel.setText (juce::String (groupCount) + WT_U8 (" グループ。グループを選んで試聴し、Category / Type を決めて割り当てます。"), juce::dontSendNotification);
+}
+
+void OrganizerPanel::suggestGroups()
+{
+    std::vector<FeatureVector> vectors;
+    for (const auto& f : files)
+        if (const auto* r = store.find (f))
+            vectors.push_back (r->v);
+
+    if (vectors.size() < 4)
+        return;
+    kSlider.setValue (suggestK (normalise (vectors), 20), juce::dontSendNotification);
+}
+
+void OrganizerPanel::runGrouping()
+{
+    std::vector<int> index;
+    std::vector<FeatureVector> vectors;
+    for (size_t i = 0; i < files.size(); ++i)
+        if (const auto* r = store.find (files[i]))
+        {
+            index.push_back ((int) i);
+            vectors.push_back (r->v);
+        }
+
+    if (vectors.size() < 2)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, WT_U8 ("グループ分け"), WT_U8 ("先に「① 音を解析」を実行してください。"));
+        return;
+    }
+
+    const auto result = kmeans (normalise (vectors), (int) kSlider.getValue());
+
+    // number the groups by size so that G1 is the biggest
+    std::vector<std::vector<int>> raw ((size_t) result.k);
+    for (size_t j = 0; j < index.size(); ++j)
+    {
+        raw[(size_t) result.assignment[j]].push_back (index[j]);
+        distance[(size_t) index[j]] = result.distance[j];
+    }
+    std::sort (raw.begin(), raw.end(), [] (const auto& a, const auto& b) { return a.size() > b.size(); });
+    raw.erase (std::remove_if (raw.begin(), raw.end(), [] (const auto& g) { return g.empty(); }), raw.end());
+
+    groupMembers = raw;
+    groupCount = (int) groupMembers.size();
+    for (auto& members : groupMembers)
+        std::sort (members.begin(), members.end(), [this] (int a, int b) { return distance[(size_t) a] < distance[(size_t) b]; });
+    for (int g = 0; g < groupCount; ++g)
+        for (auto i : groupMembers[(size_t) g])
+            assignment[(size_t) i] = g;
+
+    currentGroup = groupCount > 0 ? 0 : -1;
+    refreshGroups();
+    groupsList.selectRow (0);
+    updateStatus();
+}
+
+void OrganizerPanel::refreshGroups()
+{
+    groupsList.updateContent();
+    groupsList.repaint();
+    filesTable.updateContent();
+    filesTable.repaint();
+}
+
+void OrganizerPanel::selectGroup (int group)
+{
+    currentGroup = group;
+    filesTable.updateContent();
+    filesTable.deselectAllRows();
+    filesTable.repaint();
+}
+
+juce::Array<int> OrganizerPanel::selectedFileIndices() const
+{
+    juce::Array<int> out;
+    if (currentGroup < 0 || currentGroup >= groupCount)
+        return out;
+
+    const auto sel = filesTable.getSelectedRows();
+    for (int i = 0; i < sel.size(); ++i)
+        if (sel[i] < (int) groupMembers[(size_t) currentGroup].size())
+            out.add (groupMembers[(size_t) currentGroup][(size_t) sel[i]]);
+    return out;
+}
+
+void OrganizerPanel::pickCategory()
+{
+    auto picker = std::make_unique<CategoryPicker> (catalog, category, [this] (const juce::String& name) {
+        category = name;
+        catalog.noteUsed (name);
+        categoryButton.setButtonText ("Category: " + (name.isEmpty() ? WT_U8 ("(未選択)") : name) + " " + WT_U8 ("▾"));
+    }, [] {});
+    picker->setSize (400, 560);
+    juce::CallOutBox::launchAsynchronously (std::move (picker), categoryButton.getScreenBounds(), nullptr);
+}
+
+void OrganizerPanel::pickTypeFromMenu()
+{
+    const auto types = catalog.getTypes (category);
+    juce::PopupMenu menu;
+    for (size_t i = 0; i < types.size(); ++i)
+        menu.addItem ((int) i + 1, types[i].name + "      " + types[i].jp);
+    if (types.empty())
+        menu.addItem (-1, WT_U8 ("(Category を選ぶと候補が出ます)"), false);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&typeMenuButton), [this, types] (int r) {
+        if (r > 0)
+            typeEditor.setText (types[(size_t) r - 1].name);
+    });
+}
+
+void OrganizerPanel::assign (const juce::Array<int>& fileIndices)
+{
+    if (fileIndices.isEmpty())
+        return;
+
+    const auto type = typeEditor.getText().trim();
+    if (category.isEmpty() || type.isEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, WT_U8 ("割り当て"), WT_U8 ("Category と Type の両方を決めてから割り当ててください。"));
+        return;
+    }
+
+    const auto roots = hooks.getRoots();
+    for (auto i : fileIndices)
+        db.assign (ReclassDb::makeKey (roots, files[(size_t) i]), category, type, "G" + juce::String (assignment[(size_t) i] + 1) + " " + folder.getFileName());
+
+    db.save (catalog.getDirectory().getChildFile ("reclass.json"));
+    refreshGroups();
+    refreshOutput();
+}
+
+void OrganizerPanel::unassign (const juce::Array<int>& fileIndices)
+{
+    const auto roots = hooks.getRoots();
+    for (auto i : fileIndices)
+        db.unassign (ReclassDb::makeKey (roots, files[(size_t) i]));
+    db.save (catalog.getDirectory().getChildFile ("reclass.json"));
+    refreshGroups();
+    refreshOutput();
+}
+
+void OrganizerPanel::moveToGroup (const juce::Array<int>& fileIndices, int group)
+{
+    if (group < 0 || group >= groupCount)
+        return;
+
+    for (auto i : fileIndices)
+    {
+        auto& from = groupMembers[(size_t) assignment[(size_t) i]];
+        from.erase (std::remove (from.begin(), from.end(), i), from.end());
+        groupMembers[(size_t) group].push_back (i);
+        assignment[(size_t) i] = group;
+    }
+    std::sort (groupMembers[(size_t) group].begin(), groupMembers[(size_t) group].end(), [this] (int a, int b) { return distance[(size_t) a] < distance[(size_t) b]; });
+    refreshGroups();
+}
+
+void OrganizerPanel::audition (const juce::File& f)
+{
+    if (player == nullptr)
+        player = std::make_unique<PlaybackEngine>();
+    player->stop();
+
+    if (f.getSize() > 120 * 1024 * 1024)
+        return;
+
+    const auto generation = ++auditionGeneration;
+    juce::Component::SafePointer<OrganizerPanel> safe (this);
+    jobs.addJob ([this, safe, f, generation] {
+        if (generation != auditionGeneration)
+            return;
+        juce::String error;
+        auto audio = loadAudioFile (formats, f, error);
+        juce::MessageManager::callAsync ([safe, audio, generation] {
+            if (safe == nullptr || audio == nullptr || generation != safe->auditionGeneration)
+                return;
+            safe->player->setAudio (audio);
+            safe->player->play (0, -1, false);
+        });
+    });
+}
+
+//==============================================================================
+juce::File OrganizerPanel::manifestFile() const
+{
+    return hooks.getOutputDir().getChildFile ("_links_manifest.json");
+}
+
+std::vector<AssignedFile> OrganizerPanel::resolveAssigned() const
+{
+    std::vector<AssignedFile> out;
+    const auto roots = hooks.getRoots();
+    for (const auto& [key, e] : db.all())
+    {
+        const auto f = ReclassDb::resolve (roots, key);
+        if (f != juce::File())
+            out.push_back ({ f, e.category, e.type });
+    }
+    return out;
+}
+
+void OrganizerPanel::refreshOutput()
+{
+    const auto dir = hooks.getOutputDir();
+    outputPath.setText (dir.getFullPathName().isEmpty() ? WT_U8 ("(未設定)") : dir.getFullPathName(), juce::dontSendNotification);
+
+    std::set<juce::String> kinds;
+    for (const auto& [k, e] : db.all())
+        kinds.insert (e.category + "/" + e.type);
+
+    outputSummary.setText (WT_U8 ("割り当て済み: ") + juce::String ((int) db.size()) + WT_U8 (" ファイル / ") + juce::String ((int) kinds.size()) + WT_U8 (" 種類 (Category / Type)\n"
+                                  "整理ビューは、元のファイルへのハードリンクとして作ります。元の場所・名前・Cubase の参照は変わりません (出力先は元と同じドライブが必要です)。"),
+                           juce::dontSendNotification);
+}
+
+void OrganizerPanel::previewPlan()
+{
+    const auto out = hooks.getOutputDir();
+    if (out.getFullPathName().isEmpty())
+    {
+        planText.setText (WT_U8 ("出力先が未設定です。「出力先を変更...」で、元のファイルと同じドライブのフォルダを選んでください。"));
+        return;
+    }
+
+    const auto plan = planLinks (out, resolveAssigned());
+    juce::String text = juce::String ((int) plan.items.size()) + WT_U8 (" 個のリンクを作ります\n出力先: ") + out.getFullPathName() + "\n\n";
+    for (const auto& p : plan.problems)
+        text += WT_U8 ("! ") + p + "\n";
+    if (! plan.problems.isEmpty())
+        text += "\n";
+
+    int shown = 0;
+    for (const auto& item : plan.items)
+    {
+        if (++shown > 60)
+        {
+            text += "...\n";
+            break;
+        }
+        text += item.target.getRelativePathFrom (out) + "   <-   " + item.source.getFullPathName() + "\n";
+    }
+    planText.setText (text);
+}
+
+void OrganizerPanel::createView()
+{
+    const auto out = hooks.getOutputDir();
+    const auto plan = planLinks (out, resolveAssigned());
+    if (out.getFullPathName().isEmpty() || plan.items.empty() || ! plan.problems.isEmpty())
+    {
+        previewPlan();
+        return;
+    }
+
+    juce::Component::SafePointer<OrganizerPanel> safe (this);
+    juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, WT_U8 ("整理ビューを作成"),
+                                        juce::String ((int) plan.items.size()) + WT_U8 (" 個のハードリンクを作ります。\n\n") + out.getFullPathName()
+                                            + WT_U8 ("\n\n元のファイルは変更されません。あとで「作成したリンクを取り消す」で元に戻せます。"),
+                                        WT_U8 ("作成する"), WT_U8 ("キャンセル"), this,
+                                        juce::ModalCallbackFunction::create ([safe, plan] (int result) {
+                                            if (safe == nullptr || result != 1)
+                                                return;
+                                            safe->outputSummary.setText (WT_U8 ("作成中..."), juce::dontSendNotification);
+                                            safe->jobs.addJob ([safe, plan] {
+                                                if (safe == nullptr)
+                                                    return;
+                                                const auto manifest = safe->manifestFile();
+                                                const auto run = createLinks (plan, manifest);
+                                                juce::MessageManager::callAsync ([safe, run] {
+                                                    if (safe == nullptr)
+                                                        return;
+                                                    safe->refreshOutput();
+                                                    safe->planText.setText (juce::String (run.created) + WT_U8 (" 個を作成、") + juce::String (run.alreadyThere) + WT_U8 (" 個はすでにありました。\n")
+                                                                            + (run.errors.isEmpty() ? juce::String() : WT_U8 ("\n注意:\n") + run.errors.joinIntoString ("\n")));
+                                                });
+                                            });
+                                        }));
+}
+
+void OrganizerPanel::undoView()
+{
+    juce::Component::SafePointer<OrganizerPanel> safe (this);
+    juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, WT_U8 ("リンクを取り消す"),
+                                        WT_U8 ("このツールが作ったハードリンクだけを削除します。元のファイルは残ります。よろしいですか?"),
+                                        WT_U8 ("取り消す"), WT_U8 ("キャンセル"), this, juce::ModalCallbackFunction::create ([safe] (int result) {
+                                            if (safe == nullptr || result != 1)
+                                                return;
+                                            const auto r = undoLinks (safe->manifestFile());
+                                            safe->planText.setText (juce::String (r.removed) + WT_U8 (" 個のリンクを取り消しました。\n") + (r.kept > 0 ? juce::String (r.kept) + WT_U8 (" 個は、リンクではなくなっていたため触れていません:\n") + r.notes.joinIntoString ("\n") : juce::String()));
+                                        }));
+}
+
+void OrganizerPanel::exportExcel()
+{
+    const auto file = catalog.getDirectory().getChildFile ("reclass.xlsx");
+    juce::String error;
+    if (xlsx::write (file, { { "Reclass", db.toRows() } }, error))
+    {
+        planText.setText (WT_U8 ("書き出しました:\n") + file.getFullPathName() + WT_U8 ("\n\n(これは確認用の書き出しです。正本は reclass.json です)"));
+        file.revealToUser();
+    }
+    else
+    {
+        planText.setText (WT_U8 ("書き出せませんでした: ") + error);
+    }
+}
+
+void OrganizerPanel::chooseOutput()
+{
+    chooser = std::make_unique<juce::FileChooser> (WT_U8 ("整理ビューの出力先 (元のファイルと同じドライブ)"), hooks.getOutputDir());
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, [this] (const juce::FileChooser& fc) {
+        const auto dir = fc.getResult();
+        if (dir.isDirectory() && hooks.setOutputDir)
+        {
+            hooks.setOutputDir (dir);
+            refreshOutput();
+        }
+    });
+}
+
+void OrganizerPanel::runDemo (const juce::File& dir, const juce::String& cat, const juce::String& type)
+{
+    loadFolder (dir);
+    for (const auto& f : files)
+    {
+        FeatureVector v {};
+        if (computeFeatures (formats, f, v))
+            store.put (f, v);
+    }
+    loadFolder (dir);
+    kSlider.setValue (3.0, juce::dontSendNotification);
+    runGrouping();
+
+    category = cat;
+    categoryButton.setButtonText ("Category: " + cat + " " + WT_U8 ("▾"));
+    typeEditor.setText (type);
+    if (groupCount > 0)
+    {
+        juce::Array<int> all;
+        for (auto i : groupMembers[0])
+            all.add (i);
+        assign (all);
+    }
+    filesTable.selectRow (0);
+    previewPlan();
+}
+
+//==============================================================================
+OrganizerWindow::OrganizerWindow (Catalog& catalog, FeatureStore& store, juce::AudioFormatManager& formats, OrganizerHooks hooks)
+    : DocumentWindow (WT_U8 ("ライブラリの区分し直し (元のファイルは変更しません)"), theme::background, DocumentWindow::closeButton | DocumentWindow::minimiseButton)
+{
+    setUsingNativeTitleBar (true);
+    panel = new OrganizerPanel (catalog, store, formats, std::move (hooks));
+    setContentOwned (panel, false);
+    setResizable (true, false);
+    setResizeLimits (980, 560, 4000, 3000);
+    centreWithSize (1180, 700);
+}
+} // namespace wt

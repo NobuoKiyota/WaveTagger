@@ -21,6 +21,9 @@ public:
     /** Return / Escape pressed in one of the text fields: hand focus back to the main window. */
     std::function<void()> onEditingFinished;
 
+    /** A Category was picked (or created): the owner decides what that changes (Prefix, Type names ...). */
+    std::function<void (const juce::String& category)> onCategoryChosen;
+
     /** Existing-count summary and similar-name warning coming from the library index. */
     void setLibraryInfo (const juce::String& summary, const juce::String& warning);
 

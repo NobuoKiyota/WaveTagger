@@ -2,6 +2,7 @@
 
 #include "InputMap.h"
 #include "KeyMap.h"
+#include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 namespace wt
@@ -52,11 +53,11 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FolderSettingsComponent)
 };
 
-/** Tabs: mouse wheel assignments, keyboard shortcuts, shared settings folder. */
+/** Tabs: mouse wheel assignments, keyboard shortcuts, shared settings folder, audio device. */
 class InputSettingsComponent : public juce::TabbedComponent
 {
 public:
-    InputSettingsComponent (WheelMap& wheel, KeyMap& keys, std::function<void()> onChanged,
+    InputSettingsComponent (WheelMap& wheel, KeyMap& keys, juce::AudioDeviceManager& devices, std::function<void()> onChanged,
                             std::function<juce::File()> getFolder, std::function<juce::String (const juce::File&)> onChooseFolder);
 };
 } // namespace wt

@@ -217,9 +217,9 @@ void writeState (const SyncState& st)
 
 void seedRows (std::vector<juce::StringArray>& categoryRows, std::vector<juce::StringArray>& typeRows)
 {
-    categoryRows = { { "Category", "Japanese", "Note" } };
+    categoryRows = { { "Category", "Japanese", "Note", "Prefix" } };
     for (const auto& c : wt::getCategories())
-        categoryRows.push_back ({ c.name, c.jp, "" });
+        categoryRows.push_back ({ c.name, c.jp, "", "" });
 
     typeRows = { { "Category", "Type", "Japanese", "Note" } };
     for (const auto& t : seedTypes)
@@ -494,7 +494,7 @@ void Catalog::reload()
         }
 
         seen.add (name);
-        categories.push_back ({ name, r[1].trim(), r[2].trim() });
+        categories.push_back ({ name, r[1].trim(), r[2].trim(), r[3].trim() });
     }
 
     line = 0;
@@ -560,7 +560,7 @@ bool Catalog::addCategory (const juce::String& name, const juce::String& jp)
         if (c.name.equalsIgnoreCase (clean))
             return true;
 
-    const auto ok = appendRow (false, { clean, jp.trim(), "" });
+    const auto ok = appendRow (false, { clean, jp.trim(), "", "" });
     reload();
     return ok;
 }

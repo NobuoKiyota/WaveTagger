@@ -29,3 +29,11 @@
 - 開く時は WAV 内の `wtag` と PC のプロジェクト (`%APPDATA%\WaveTagger\projects`) の**新しい方**を採用 (`preferEmbedded`)。タイプは**名前**でパレットに対応付け、無ければ空き枠に追加
 - Raw フォルダの外の WAV は「Raw にコピーして書き込む(推奨) / 元に書き込む / キャンセル」を確認。Raw 内の WAV は直接更新。Raw の場所は PC ごと (`settings.json` の `rawDir`、初回に選択)
 - 検証: `--selftest-wav` (22 項目: 音声サンプル完全一致・他チャンク保持・拒否ケース・名前での対応付けなど)。`riff_check.py` 相当の独立確認は Python の `wave` / 手書き RIFF パーサで行った
+
+## Category 連動 / Inbox / 区分し直し (Phase 4・5)
+- Category を選ぶと Prefix と Type 9 枠がその Category のものに切り替わる (`CategoryProfiles`: 最後に使った設定を覚える。初回は CSV の `Prefix` 列 → Title case、Type は候補の先頭 9 件)。打ったサイクルがある時だけ確認ダイアログ。`preferences.json` (共通) に保存
+- **Inbox** (`Core/InboxProcessor`, `UI/InboxWindow`, ツールバー `Inbox`): 受信フォルダを 2 秒ごとに監視し、サイズ/更新時刻が 3 回連続で変わらないファイルだけ処理 → Raw/<年>/ にコピー (内容一致を検証、wav 以外は 24bit WAV に変換) → 自動分割 → cue + wtag を Raw のコピーに埋め込み → 元ファイルを `_Done/` へ移動。フォルダ名がラベル (`TOOLS/Open/x.wav` = Category TOOLS, Type Open)。失敗したファイルはそのまま残し再試行しない。**初めて監視を ON にする時、フォルダに既にある録音は「すべて取り込む/新しい録音だけ」を選ぶ** (`inbox_ignored.json` に保存し再起動後も有効)。キューは `inbox_queue.json` (PC ごと)
+- **区分し直し** (`Core/AudioFeatures`, `FeatureStore`, `Clustering`, `ReclassDb`, `HardLinks`, `UI/OrganizerWindow`, `Library` ボタンのメニュー): 先頭 4 秒から 48 次元の特徴量 → k-means でグループ化 → グループごとに Category/Type を割り当て → `reclass.json` (設定フォルダ。共有) に記録。**元ファイルは一切変更しない**。整理ビューは NTFS ハードリンク (`<Category>/<Type>/<Category>_<Type>NN.ext`)、同一ドライブ必須、作成したリンクだけを manifest で取り消し可能。特徴量は `features.bin` (PC ごと、追記型で再開可能)
+- 検証: `--selftest-inbox` (22) / `--selftest-watcher` (9, 実スレッド) / `--selftest-organize` (28) / `--selftest-prefs` (21)。画面確認: `--snapshot-inbox` / `--snapshot-organizer`
+- `JUCE_MODAL_LOOPS_PERMITTED=1` は自己テストがメッセージループを手動で回すためだけに有効化
+- JSON の `getArray()` は、一時的な `var` に対して呼ぶとダングリングポインタになる (`readJson(f).getArray()` は不可。いったん変数に受ける)

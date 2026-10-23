@@ -22,7 +22,7 @@ MainComponent::MainComponent()
     formats.registerBasicFormats();
     setWantsKeyboardFocus (true);
 
-    for (auto* b : { &openButton, &audioButton, &importButton, &splitButton, &exportButton, &libraryButton, &inputButton })
+    for (auto* b : { &openButton, &inboxButton, &importButton, &splitButton, &exportButton, &libraryButton, &inputButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -37,12 +37,27 @@ MainComponent::MainComponent()
     addAndMakeVisible (continueToggle);
 
     openButton.onClick = [this] { showOpenDialog(); };
-    audioButton.onClick = [this] { showAudioSettings(); };
+    inboxButton.onClick = [this] { showInbox(); };
     importButton.setButtonText (juce::String ("Markers ") + WT_U8 ("▾"));
     importButton.onClick = [this] { showMarkersMenu(); };
     splitButton.onClick = [this] { if (audio != nullptr) showAutoSplitDialog(); };
     exportButton.onClick = [this] { if (audio != nullptr) startExport(); };
-    libraryButton.onClick = [this] { showLibrary(); };
+    libraryButton.onClick = [this] {
+        juce::PopupMenu menu;
+        menu.addItem (1, WT_U8 ("ライブラリ検索   ") + keyMap.describe (Action::Library));
+        menu.addItem (2, WT_U8 ("過去ライブラリの区分し直し..."));
+
+        juce::Component::SafePointer<MainComponent> safe (this);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&libraryButton), [safe] (int r) {
+            if (safe == nullptr)
+                return;
+            if (r == 1)
+                safe->showLibrary();
+            else if (r == 2)
+                safe->showOrganizer();
+        });
+    };
+    inputButton.setButtonText (WT_U8 ("設定..."));
     inputButton.onClick = [this] { showInputSettings(); };
 
     const auto schemes = theme::getSpectrogramSchemeNames();
@@ -101,6 +116,7 @@ MainComponent::MainComponent()
     waveView.setWheelMap (&wheelMap);
     spectrogram.onNewImage = [this] { waveView.repaint(); };
 
+    palette.onCategoryChosen = [this] (const juce::String& name) { chooseCategory (name); };
     palette.onSlotClicked = [this] (int slot) { handleTypeKey (slot); grabKeyboardFocus(); };
     palette.onEditingFinished = [this] { grabKeyboardFocus(); };
 
@@ -166,6 +182,12 @@ MainComponent::MainComponent()
 
     loadSettings();
 
+    inboxQueue.load();
+    featureStore.load();
+    inboxWatcher.onOutcome = [this] (const InboxOutcome& o) { handleInboxOutcome (o); };
+    configureInbox();
+    updateInboxBadge();
+
     view.addChangeListener (this);
     cycles.addChangeListener (this);
     libraryIndex.addChangeListener (this);
@@ -191,6 +213,7 @@ MainComponent::~MainComponent()
     libraryIndex.removeChangeListener (this);
     catalog.removeChangeListener (this);
     libraryWindow = nullptr;
+    organizerWindow = nullptr;
     loader.removeAllJobs (true, 10000);
     spectrogram.onNewImage = nullptr;
     waveView.setCycleModel (nullptr);
@@ -218,6 +241,10 @@ void MainComponent::loadSettings()
 
     exportDir = juce::File (s.getProperty ("exportDir", "").toString());
     rawDir = juce::File (s.getProperty ("rawDir", "").toString());
+    inboxDir = juce::File (s.getProperty ("inboxDir", "").toString());
+    organizedDir = juce::File (s.getProperty ("organizedDir", "").toString());
+    inboxWatch = (bool) s.getProperty ("inboxWatch", false);
+    backlogDecidedFor = s.getProperty ("inboxBacklogDecidedFor", "").toString();
     migrationDeclined = (bool) s.getProperty ("configMigrationDeclined", false);
 
     // Shared settings come from the config folder. The first time, carry over what this PC had in settings.json.
@@ -237,6 +264,8 @@ void MainComponent::applySharedPreferences (const juce::var& v)
     if (! v.isObject())
         return;
 
+    const juce::ScopedValueSetter<bool> guard (applyingProfile, true); // loading must not be mistaken for the user editing
+    profiles.fromVar (v.getProperty ("categoryProfiles", {}));
     catalog.usageFromVar (v.getProperty ("categoryUsage", {}));
     keyMap.fromVar (v.getProperty ("keys", {}));
     cycles.settingsFromVar (v.getProperty ("cycle", {}));
@@ -269,6 +298,10 @@ void MainComponent::saveNow()
     auto* local = new juce::DynamicObject();
     local->setProperty ("exportDir", exportDir.getFullPathName());
     local->setProperty ("rawDir", rawDir.getFullPathName());
+    local->setProperty ("inboxDir", inboxDir.getFullPathName());
+    local->setProperty ("organizedDir", organizedDir.getFullPathName());
+    local->setProperty ("inboxWatch", inboxWatch);
+    local->setProperty ("inboxBacklogDecidedFor", backlogDecidedFor);
     local->setProperty ("configDir", catalog.getDirectory().getFullPathName());
     local->setProperty ("configMigrationDeclined", migrationDeclined);
 
@@ -288,6 +321,7 @@ void MainComponent::saveNow()
         shared->setProperty ("wheel", wheelMap.toVar());
         shared->setProperty ("keys", keyMap.toVar());
         shared->setProperty ("categoryUsage", catalog.usageToVar());
+        shared->setProperty ("categoryProfiles", profiles.toVar());
         shared->setProperty ("scheme", schemeCombo.getSelectedId() - 1);
 
         const auto prefsFile = catalog.getPreferencesFile();
@@ -514,6 +548,14 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     if (source == &cycles)
     {
+        if (! applyingProfile && cycles.getCategory().isNotEmpty())
+        {
+            juce::StringArray names;
+            for (int i = 0; i < CycleModel::numSlots; ++i)
+                names.add (cycles.getType (i).name);
+            profiles.remember (cycles.getCategory(), cycles.getPrefix(), names);
+        }
+
         scheduleSave();
         waveView.setSelectedCycles (list.getSelectedRows());
         refreshLibraryInfo();
@@ -524,6 +566,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
     }
     else if (source == &catalog)
     {
+        configureInbox();
         scheduleSave();
     }
     else
@@ -628,7 +671,7 @@ void MainComponent::updateHint()
 void MainComponent::showInputSettings()
 {
     auto* content = new InputSettingsComponent (
-        wheelMap, keyMap,
+        wheelMap, keyMap, playback.getDeviceManager(),
         [this] {
             updateHint();
             scheduleSave();
@@ -967,6 +1010,263 @@ void MainComponent::refreshLibraryInfo()
 }
 
 //==============================================================================
+// Inbox: new recordings are copied to Raw, split into cycles, and queued for review
+//==============================================================================
+InboxPanel::Hooks MainComponent::makeInboxHooks()
+{
+    InboxPanel::Hooks hooks;
+    hooks.getInbox = [this] { return inboxDir; };
+    hooks.getRaw = [this] { return rawDir; };
+    hooks.isWatching = [this] { return inboxWatch; };
+    hooks.getStatus = [this] { return inboxWatcher.getStatus(); };
+    hooks.chooseInbox = [this] { chooseInboxFolder ({}); };
+    hooks.chooseRaw = [this] { chooseRawFolder ([this] { configureInbox(); }); };
+    hooks.scanNow = [this] { inboxWatcher.scanNow(); };
+    hooks.setWatching = [this] (bool on) { setInboxWatching (on); };
+    hooks.openItem = [this] (const QueueItem& q) {
+        const juce::File f (q.raw.isNotEmpty() ? q.raw : q.original);
+        if (f.existsAsFile())
+            openFile (f);
+        else
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Inbox", WT_U8 ("ファイルが見つかりません:\n") + f.getFullPathName());
+    };
+    hooks.retryItem = [this] (const QueueItem& q) {
+        inboxWatcher.forgetFailure (juce::File (q.original));
+        for (int i = 0; i < inboxQueue.size(); ++i)
+            if (inboxQueue.getItems()[(size_t) i].original == q.original && inboxQueue.getItems()[(size_t) i].status == "failed")
+            {
+                inboxQueue.remove (i);
+                break;
+            }
+        inboxQueue.save();
+        updateInboxBadge();
+        inboxWatcher.scanNow();
+    };
+    hooks.queueChanged = [this] {
+        inboxQueue.save();
+        updateInboxBadge();
+    };
+    return hooks;
+}
+
+void MainComponent::showOrganizer()
+{
+    if (organizerWindow == nullptr)
+    {
+        OrganizerHooks hooks;
+        hooks.getRoots = [this] { return libraryIndex.getRoots(); };
+        hooks.getOutputDir = [this] {
+            if (organizedDir.getFullPathName().isNotEmpty())
+                return organizedDir;
+
+            // the organised view must sit on the same drive as the originals: next to the first library root
+            const auto roots = libraryIndex.getRoots();
+            if (juce::File ("G:\\SFX_Library").isDirectory())
+                return juce::File ("G:\\SFX_Library\\_Organized");
+            return roots.isEmpty() ? juce::File() : juce::File (roots[0]).getParentDirectory().getChildFile ("_Organized");
+        };
+        hooks.setOutputDir = [this] (const juce::File& dir) {
+            organizedDir = dir;
+            scheduleSave();
+        };
+        organizerWindow = std::make_unique<OrganizerWindow> (catalog, featureStore, formats, hooks);
+    }
+
+    organizerWindow->setVisible (true);
+    organizerWindow->toFront (true);
+}
+
+void MainComponent::showInbox()
+{
+    if (inboxWindow == nullptr)
+        inboxWindow = std::make_unique<InboxWindow> (inboxQueue, makeInboxHooks());
+
+    inboxWindow->getPanel().refresh();
+    inboxWindow->setVisible (true);
+    inboxWindow->toFront (true);
+}
+
+void MainComponent::updateInboxBadge()
+{
+    const auto n = inboxQueue.countNew();
+    inboxButton.setButtonText (n > 0 ? "Inbox (" + juce::String (n) + ")" : juce::String ("Inbox"));
+    if (inboxWindow != nullptr)
+        inboxWindow->getPanel().refresh();
+}
+
+void MainComponent::configureInbox()
+{
+    InboxWatcher::Config config;
+    config.inbox = inboxDir;
+    config.raw = rawDir;
+    config.enabled = inboxWatch && inboxDir.isDirectory() && rawDir.getFullPathName().isNotEmpty();
+    for (const auto& c : catalog.getCategories())
+        config.categoryNames.add (c.name);
+    config.stateFile = getAppDataDir().getChildFile ("inbox_ignored.json");
+    inboxWatcher.configure (config);
+}
+
+void MainComponent::handleInboxOutcome (const InboxOutcome& outcome)
+{
+    inboxQueue.add (outcome);
+    inboxQueue.save();
+    updateInboxBadge();
+}
+
+void MainComponent::chooseInboxFolder (std::function<void()> then)
+{
+    auto start = inboxDir;
+    if (! start.isDirectory())
+    {
+        const auto drive = juce::String::fromUTF8 ("D:\\マイドライブ\\pcm録音");
+        start = juce::File (drive).isDirectory() ? juce::File (drive) : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    }
+
+    chooser = std::make_unique<juce::FileChooser> (WT_U8 ("受信フォルダを選択 (新しい録音だけが入るフォルダ。pcm録音 の中に _Inbox を作るのがおすすめです)"), start);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [this, then = std::move (then)] (const juce::FileChooser& fc) {
+                              const auto dir = fc.getResult();
+                              if (! dir.isDirectory())
+                                  return;
+                              inboxDir = dir;
+                              scheduleSave();
+                              configureInbox();
+                              updateInboxBadge();
+                              if (then)
+                                  then();
+                          });
+}
+
+void MainComponent::setInboxWatching (bool on)
+{
+    if (! on)
+    {
+        inboxWatch = false;
+        configureInbox();
+        scheduleSave();
+        updateInboxBadge();
+        return;
+    }
+
+    if (! inboxDir.isDirectory())
+    {
+        chooseInboxFolder ([this] { setInboxWatching (true); });
+        return;
+    }
+    if (rawDir.getFullPathName().isEmpty())
+    {
+        chooseRawFolder ([this] { setInboxWatching (true); });
+        return;
+    }
+
+    const auto begin = [this] {
+        inboxWatch = true;
+        backlogDecidedFor = inboxDir.getFullPathName();
+        configureInbox();
+        scheduleSave();
+        updateInboxBadge();
+    };
+
+    // Recordings already sitting in the folder are never imported by surprise
+    const auto existing = (int) listInboxCandidates (inboxDir).size();
+    if (existing == 0 || backlogDecidedFor == inboxDir.getFullPathName())
+    {
+        begin();
+        return;
+    }
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::AlertWindow::showYesNoCancelBox (
+        juce::MessageBoxIconType::QuestionIcon, WT_U8 ("すでにある録音の扱い"),
+        WT_U8 ("この受信フォルダには、すでに ") + juce::String (existing) + WT_U8 (" 個の録音があります。\n\n"
+               "・すべて取り込む: Raw にコピーし、自動分割して、元のファイルは _Done に移します\n"
+               "・新しい録音だけ取り込む: いまある分は、そのまま触らずに残します"),
+        WT_U8 ("すべて取り込む"), WT_U8 ("新しい録音だけ"), WT_U8 ("キャンセル"), this,
+        juce::ModalCallbackFunction::create ([safe, begin] (int result) {
+            if (safe == nullptr || result == 0)
+                return;
+
+            if (result == 2)
+                safe->inboxWatcher.ignoreExisting();
+            begin();
+        }));
+}
+
+//==============================================================================
+// Category -> Prefix / Type names
+//==============================================================================
+CategoryProfile MainComponent::resolveCategoryProfile (const juce::String& name) const
+{
+    juce::String csvPrefix;
+    for (const auto& c : catalog.getCategories())
+        if (c.name == name)
+            csvPrefix = c.prefix;
+
+    return profiles.resolve (name, csvPrefix, catalog.getTypes (name));
+}
+
+void MainComponent::applyCategoryProfile (const juce::String& name, const CategoryProfile& profile)
+{
+    {
+        // one batch: the palette passes through half-updated states that must not be remembered
+        const juce::ScopedValueSetter<bool> guard (applyingProfile, true);
+        cycles.setPrefix (profile.prefix);
+        for (int i = 0; i < CycleModel::numSlots; ++i)
+            cycles.setTypeName (i, profile.types[i]);
+        cycles.setCategory (name);
+    }
+
+    juce::StringArray names;
+    for (int i = 0; i < CycleModel::numSlots; ++i)
+        names.add (cycles.getType (i).name);
+    profiles.remember (name, cycles.getPrefix(), names);
+}
+
+/** Choosing a Category switches Prefix and Type names to that Category's own. If cycles are already typed, ask first,
+    because their output names would change. */
+void MainComponent::chooseCategory (const juce::String& name)
+{
+    catalog.noteUsed (name);
+
+    if (name.isEmpty())
+    {
+        cycles.setCategory (name);
+        return;
+    }
+
+    const auto target = resolveCategoryProfile (name);
+
+    bool differs = cycles.getPrefix() != target.prefix;
+    for (int i = 0; i < CycleModel::numSlots; ++i)
+        differs = differs || cycles.getType (i).name != target.types[i];
+
+    bool anyTyped = false;
+    for (int i = 0; i < cycles.size(); ++i)
+        anyTyped = anyTyped || cycles[i].type >= 0;
+
+    if (! differs || ! anyTyped)
+    {
+        applyCategoryProfile (name, target);
+        return;
+    }
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::AlertWindow::showOkCancelBox (
+        juce::MessageBoxIconType::QuestionIcon, WT_U8 ("Category に合わせて切り替えますか?"),
+        WT_U8 ("「") + name + WT_U8 ("」の Prefix と Type 名に切り替えます。\n\nPrefix: ") + cycles.getPrefix() + " -> " + target.prefix
+            + WT_U8 ("\n\nすでに打ったサイクルの出力名も変わります。「いまのまま」を選ぶと、Category だけ変え、現在の Prefix と Type 名をこの Category の設定として覚えます。"),
+        WT_U8 ("切り替える"), WT_U8 ("いまのまま"), this,
+        juce::ModalCallbackFunction::create ([safe, name, target] (int result) {
+            if (safe == nullptr)
+                return;
+            if (result == 1)
+                safe->applyCategoryProfile (name, target);
+            else
+                safe->cycles.setCategory (name); // keeps the current names; they are remembered for this Category
+        }));
+}
+
+//==============================================================================
 // Markers inside the WAV
 //==============================================================================
 void MainComponent::showMarkersMenu()
@@ -1123,6 +1423,10 @@ void MainComponent::embedFinished (const EmbedResult& result, const juce::File& 
         return;
     }
 
+    inboxQueue.markReviewed (dest.getFullPathName());
+    inboxQueue.save();
+    updateInboxBadge();
+
     const auto message = juce::String (result.regionsWritten) + WT_U8 (" 件のマーカーを書き込みました。\n") + dest.getFullPathName()
                          + (switchToDest ? WT_U8 ("\n\n元の録音は変更していません。以後は、このコピーを編集しています。")
                                          : WT_U8 ("\n\n音声データは変わっていません (書き込み後に照合済み)。RX など他のソフトでも、リージョンとして見えます。"));
@@ -1206,7 +1510,7 @@ void MainComponent::resized()
     auto bar = r.removeFromTop (toolbarHeight).reduced (8, 5);
     openButton.setBounds (bar.removeFromLeft (56));
     bar.removeFromLeft (6);
-    audioButton.setBounds (bar.removeFromLeft (66));
+    inboxButton.setBounds (bar.removeFromLeft (92));
     bar.removeFromLeft (12);
     importButton.setBounds (bar.removeFromLeft (90));
     bar.removeFromLeft (6);

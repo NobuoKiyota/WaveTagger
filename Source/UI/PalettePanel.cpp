@@ -205,8 +205,15 @@ void PalettePanel::showCategoryPicker()
     auto picker = std::make_unique<CategoryPicker> (
         catalog, model.getCategory(),
         [this] (const juce::String& name) {
-            model.setCategory (name);
-            catalog.noteUsed (name);
+            if (onCategoryChosen)
+            {
+                onCategoryChosen (name);
+            }
+            else
+            {
+                model.setCategory (name);
+                catalog.noteUsed (name);
+            }
         },
         [this] { promptAddCategory(); });
     picker->setSize (400, 560);
@@ -307,8 +314,15 @@ void PalettePanel::promptAddCategory()
 
         if (safe->catalog.addCategory (name, w->getTextEditorContents ("jp")))
         {
-            safe->model.setCategory (name);
-            safe->catalog.noteUsed (name);
+            if (safe->onCategoryChosen)
+            {
+                safe->onCategoryChosen (name);
+            }
+            else
+            {
+                safe->model.setCategory (name);
+                safe->catalog.noteUsed (name);
+            }
         }
         else
         {

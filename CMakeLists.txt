@@ -21,6 +21,7 @@ target_include_directories(WaveTagger PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source
 target_compile_definitions(WaveTagger PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_MODAL_LOOPS_PERMITTED=1 # only the self tests pump the message loop by hand
     JUCE_USE_MP3AUDIOFORMAT=1
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:WaveTagger,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:WaveTagger,JUCE_VERSION>")
