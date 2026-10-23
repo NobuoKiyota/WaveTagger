@@ -352,18 +352,20 @@ void WaveView::drawCycles (juce::Graphics& g)
         const auto x2 = sampleToX ((double) c.end);
         const juce::Rectangle<float> r (x1, (float) area.getY(), juce::jmax (1.0f, x2 - x1), (float) area.getHeight());
 
-        g.setColour (colour.withAlpha (selected ? 0.30f : 0.13f));
+        // NG cycles stay visible but recede
+        const auto fade = c.ng ? 0.4f : 1.0f;
+        g.setColour (colour.withAlpha ((selected ? 0.30f : 0.13f) * fade));
         g.fillRect (r);
-        g.setColour (colour.withAlpha (selected ? 1.0f : 0.7f));
+        g.setColour (colour.withAlpha ((selected ? 1.0f : 0.7f) * fade));
         g.drawRect (r, selected ? 2.0f : 1.0f);
 
         const auto tag = r.withHeight (16.0f);
-        g.setColour (colour.withAlpha (selected ? 1.0f : 0.8f));
+        g.setColour (colour.withAlpha ((selected ? 1.0f : 0.8f) * fade));
         g.fillRect (tag);
         if (tag.getWidth() > 28.0f)
         {
             g.setColour (colour.getBrightness() > 0.6f ? juce::Colours::black : juce::Colours::white);
-            g.drawText (cycles->nameOf (i), tag.reduced (3.0f, 0.0f), juce::Justification::centredLeft, true);
+            g.drawText ((c.ng ? juce::String ("NG  ") : juce::String()) + cycles->nameOf (i), tag.reduced (3.0f, 0.0f), juce::Justification::centredLeft, true);
         }
     }
 }

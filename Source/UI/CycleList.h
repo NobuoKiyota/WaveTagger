@@ -5,7 +5,7 @@
 
 namespace wt
 {
-/** Cycle table: type dropdown per row, start / length, resulting file name. Selecting a row previews it. */
+/** Cycle table: type dropdown per row, start / length, attributes, stars, NG, resulting file name. Selecting a row previews it. */
 class CycleList : public juce::Component,
                   private juce::TableListBoxModel,
                   private juce::ChangeListener
@@ -23,6 +23,9 @@ public:
     /** A single row was selected or clicked: preview it. */
     std::function<void (int row)> onPreview;
     std::function<void (const juce::Array<int>& rows, int type)> onTypeChosen;
+    std::function<void (const juce::Array<int>& rows, int stars)> onRatingChosen;
+    std::function<void (const juce::Array<int>& rows, bool ng)> onNgChosen;
+    std::function<void (const juce::Array<int>& rows)> onEditAttributes; // double click on the attribute cell
     std::function<void()> onDeleteKey;
     std::function<void (int row)> onReturnKey;
     std::function<void()> onSelectionChanged;
@@ -38,6 +41,8 @@ private:
     void paintCell (juce::Graphics&, int row, int column, int width, int height, bool selected) override;
     juce::Component* refreshComponentForCell (int row, int column, bool selected, juce::Component* existing) override;
     void cellClicked (int row, int column, const juce::MouseEvent&) override;
+    void cellDoubleClicked (int row, int column, const juce::MouseEvent&) override;
+    juce::Array<int> rowsFor (int row) const; // the selection if the row is in it, otherwise just the row
     void selectedRowsChanged (int lastRow) override;
     void deleteKeyPressed (int) override { if (onDeleteKey) onDeleteKey(); }
     void returnKeyPressed (int row) override { if (onReturnKey) onReturnKey (row); }

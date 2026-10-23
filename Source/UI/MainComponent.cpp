@@ -1,5 +1,7 @@
 #include "MainComponent.h"
 #include "Core/AudioFeatures.h"
+#include "AttributeEditor.h"
+#include "Core/Attributes.h"
 #include "Core/Conditioning.h"
 #include "Core/Exporter.h"
 #include "Core/WavChunks.h"
@@ -182,6 +184,9 @@ MainComponent::MainComponent()
     list.onPreview = [this] (int row) { if (autoPreviewToggle.getToggleState()) previewCycle (row); };
     list.onSelectionChanged = [this] { waveView.setSelectedCycles (list.getSelectedRows()); };
     list.onTypeChosen = [this] (const juce::Array<int>& rows, int type) { applyType (rows, type); };
+    list.onRatingChosen = [this] (const juce::Array<int>& rows, int stars) { cycles.setRating (rows, stars); };
+    list.onNgChosen = [this] (const juce::Array<int>& rows, bool ng) { cycles.setNg (rows, ng); };
+    list.onEditAttributes = [this] (const juce::Array<int>& rows) { editAttributes (rows); };
     list.onDeleteKey = [this] { deleteSelectedCycles(); };
     list.onReturnKey = [this] (int row) {
         if (view.hasSelection())
@@ -464,8 +469,18 @@ void MainComponent::audioLoaded (AudioDataPtr data, const juce::String& error)
         // demo: auto-split the whole file and hand out types round-robin so the UI can be checked
         runAutoSplit ({});
         std::vector<Cycle> typed;
+        const auto demoRating = juce::SystemStats::getEnvironmentVariable ("WT_DEMO_RATING", {}).isNotEmpty();
         for (int i = 0; i < cycles.size(); ++i)
-            typed.push_back ({ cycles[i].start, cycles[i].end, i % 3 });
+        {
+            Cycle c { cycles[i].start, cycles[i].end, i % 3 };
+            if (demoRating)
+            {
+                c.rating = (i * 2 + 1) % 6;
+                c.ng = i == 1;
+                c.attributes = i % 2 == 0 ? "strength=strong material=cardboard" : "distance=close tool=hammer";
+            }
+            typed.push_back (c);
+        }
         cycles.replaceAll (std::move (typed), false);
 
         if (juce::SystemStats::getEnvironmentVariable ("WT_DEMO_ZOOM", {}).isNotEmpty())
@@ -976,6 +991,54 @@ void MainComponent::previewCycle (int index)
     playRange (c.start, c.end, false);
 }
 
+/** The cycles a key acts on: the selected rows, or else the cycle under the cursor. */
+juce::Array<int> MainComponent::targetRows() const
+{
+    auto rows = list.getSelectedRows();
+    if (rows.isEmpty())
+        if (const auto at = cycles.findAt (view.getCursor()); at >= 0)
+            rows.add (at);
+    return rows;
+}
+
+void MainComponent::rateRows (int stars)
+{
+    if (const auto rows = targetRows(); ! rows.isEmpty())
+        cycles.setRating (rows, stars);
+}
+
+void MainComponent::toggleNgRows()
+{
+    const auto rows = targetRows();
+    if (rows.isEmpty())
+        return;
+
+    // if every one is NG already this clears it, otherwise everything selected becomes NG
+    bool allNg = true;
+    for (auto r : rows)
+        allNg = allNg && r >= 0 && r < cycles.size() && cycles[r].ng;
+    cycles.setNg (rows, ! allNg);
+}
+
+void MainComponent::editAttributes (const juce::Array<int>& rows)
+{
+    if (rows.isEmpty() || rows[0] < 0 || rows[0] >= cycles.size())
+        return;
+
+    // what has been used before, from the learning log and from this recording
+    AttributeVocabulary vocabulary;
+    for (const auto& [key, sample] : labelStore.all())
+        vocabulary.learn (sample.attributes);
+    for (int i = 0; i < cycles.size(); ++i)
+        vocabulary.learn (cycles[i].attributes);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    AttributeEditor::show (vocabulary, cycles[rows[0]].attributes, rows.size(), [safe, rows] (const juce::String& text) {
+        if (safe != nullptr)
+            safe->cycles.setAttributes (rows, text);
+    });
+}
+
 void MainComponent::deleteSelectedCycles()
 {
     const auto rows = list.getSelectedRows();
@@ -1078,15 +1141,21 @@ int MainComponent::importMarkers()
     return count;
 }
 
-void MainComponent::startExport()
+std::vector<ExportItem> MainComponent::collectExportItems (int& untyped, int& ng) const
 {
     std::vector<ExportItem> items;
-    int untyped = 0;
+    untyped = 0;
+    ng = 0;
 
     const auto folder = juce::File::createLegalFileName (cycles.getPrefix().trim());
     for (int i = 0; i < cycles.size(); ++i)
     {
         const auto& c = cycles[i];
+        if (c.ng)
+        {
+            ++ng; // rejected takes are not written (they stay marked in the WAV / project)
+            continue;
+        }
         if (c.type < 0)
         {
             ++untyped;
@@ -1100,13 +1169,26 @@ void MainComponent::startExport()
         item.fileName = cycles.nameOf (i);
         item.comment = "WaveTagger type=" + cycles.typeNameOf (c.type) + "; no=" + juce::String (cycles.numberOf (i))
                        + "; src=" + audio->file.getFileName();
+        if (c.rating > 0)
+            item.comment += "; rating=" + juce::String (c.rating);
+        if (const auto attrs = normaliseAttributes (c.attributes); attrs.isNotEmpty())
+            item.comment += "; attrs=" + attrs;
         items.push_back (item);
     }
+    return items;
+}
+
+void MainComponent::startExport()
+{
+    int untyped = 0, ng = 0;
+    auto items = collectExportItems (untyped, ng);
+    const auto folder = juce::File::createLegalFileName (cycles.getPrefix().trim());
 
     if (items.empty())
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Export",
-                                                WT_U8 ("書き出せるサイクルがありません。タイプを割り当ててください。"));
+                                                WT_U8 ("書き出せるサイクルがありません。タイプを割り当ててください。")
+                                                    + (ng > 0 ? "\n\n" + juce::String (ng) + WT_U8 (" 件は NG のため書き出しません。") : juce::String()));
         return;
     }
 
@@ -1121,7 +1203,7 @@ void MainComponent::startExport()
 
     chooser = std::make_unique<juce::FileChooser> (title, start);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                          [this, items = std::move (items), untyped, options = conditioning.options] (const juce::FileChooser& fc) {
+                          [this, items = std::move (items), untyped, ng, options = conditioning.options] (const juce::FileChooser& fc) {
                               const auto root = fc.getResult();
                               if (! root.isDirectory())
                                   return;
@@ -1132,9 +1214,9 @@ void MainComponent::startExport()
                               juce::Component::SafePointer<MainComponent> safe (this);
                               auto data = audio;
                               const auto dest = root.getChildFile (items.front().subFolder);
-                              loader.addJob ([safe, data, items, untyped, root, dest, options] {
+                              loader.addJob ([safe, data, items, untyped, ng, root, dest, options] {
                                   const auto result = exportCycles (*data, items, root, 24, 2.0f, options);
-                                  juce::MessageManager::callAsync ([safe, result, untyped, root, dest, options] {
+                                  juce::MessageManager::callAsync ([safe, result, untyped, ng, root, dest, options] {
                                       if (safe != nullptr && result.written > 0)
                                       {
                                           safe->afterExport (dest);
@@ -1162,6 +1244,8 @@ void MainComponent::startExport()
                                       }
                                       if (untyped > 0)
                                           msg += "\n\n" + juce::String (untyped) + WT_U8 (" 件は未分類のためスキップしました");
+                                      if (ng > 0)
+                                          msg += "\n\n" + juce::String (ng) + WT_U8 (" 件は NG のため書き出していません");
                                       if (result.skippedExisting.size() > 0)
                                           msg += "\n\n" + juce::String (result.skippedExisting.size())
                                                  + WT_U8 (" 件は同名ファイルが既にあるため上書きせずスキップしました");
@@ -2059,6 +2143,14 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         case Action::AcceptSuggestion:
             acceptSuggestions (list.getSelectedRows());
             break;
+        case Action::Rate0:
+        case Action::Rate1:
+        case Action::Rate2:
+        case Action::Rate3:
+        case Action::Rate4:
+        case Action::Rate5:         rateRows ((int) action - (int) Action::Rate0); break;
+        case Action::ToggleNg:      toggleNgRows(); break;
+        case Action::EditAttributes: editAttributes (targetRows()); break;
         case Action::ToggleConditioned:
             abToggle.setToggleState (! abToggle.getToggleState(), juce::dontSendNotification);
             refreshListening();

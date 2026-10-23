@@ -70,6 +70,8 @@ public:
     void setRating (const juce::Array<int>& indices, int stars);
     void setNg (const juce::Array<int>& indices, bool ng);
     void setAttributes (int index, const juce::String& text);
+    /** The same text on several cycles, as one undo step. */
+    void setAttributes (const juce::Array<int>& indices, const juce::String& text);
     /** Records a suggestion on a cycle. If `apply`, the type is set too (and the cycle stays unconfirmed). */
     /** Several suggestions at once (one change notification). typeName empty = clear. Never typed, never an undo step. */
     void setSuggestions (const std::vector<int>& indices, const juce::StringArray& typeNames, const std::vector<float>& confidences);

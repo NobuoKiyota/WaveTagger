@@ -166,6 +166,21 @@ void CycleModel::setNg (const juce::Array<int>& indices, bool ng)
     changed();
 }
 
+void CycleModel::setAttributes (const juce::Array<int>& indices, const juce::String& text)
+{
+    bool any = false;
+    for (auto i : indices)
+        any = any || (i >= 0 && i < size() && cycles[(size_t) i].attributes != text);
+    if (! any)
+        return;
+
+    pushUndo();
+    for (auto i : indices)
+        if (i >= 0 && i < size())
+            cycles[(size_t) i].attributes = text;
+    changed();
+}
+
 void CycleModel::setAttributes (int index, const juce::String& text)
 {
     if (index < 0 || index >= size() || cycles[(size_t) index].attributes == text)

@@ -6,7 +6,9 @@ namespace wt
 {
 namespace
 {
-enum Column { colIndex = 1, colType, colNumber, colStart, colLength, colSuggest, colName };
+enum Column { colIndex = 1, colType, colNumber, colStart, colLength, colAttr, colStars, colNg, colSuggest, colName };
+
+constexpr int starWidth = 16, starsLeft = 6;
 }
 
 /** Leaves Space / digits / undo keys to the main window so shortcuts work while the list has focus. */
@@ -51,6 +53,9 @@ CycleList::CycleList (CycleModel& m)
     header.addColumn ("No.", colNumber, 50, 40, 80, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Start", colStart, 110, 80, 200, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Length", colLength, 90, 70, 160, juce::TableHeaderComponent::notSortable);
+    header.addColumn (WT_U8 ("属性"), colAttr, 190, 80, 500, juce::TableHeaderComponent::notSortable);
+    header.addColumn (WT_U8 ("★"), colStars, 100, 100, 100, juce::TableHeaderComponent::notResizable);
+    header.addColumn ("NG", colNg, 44, 44, 44, juce::TableHeaderComponent::notResizable);
     header.addColumn (WT_U8 ("候補 (確信度)"), colSuggest, 170, 100, 300, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Output name", colName, 300, 120, 800, juce::TableHeaderComponent::notSortable);
     header.setStretchToFitActive (true);
@@ -118,10 +123,46 @@ void CycleList::selectedRowsChanged (int lastRow)
         firePreview (lastRow);
 }
 
+juce::Array<int> CycleList::rowsFor (int row) const
+{
+    auto rows = getSelectedRows();
+    if (! rows.contains (row))
+        rows = { row };
+    return rows;
+}
+
 void CycleList::cellClicked (int row, int column, const juce::MouseEvent& e)
 {
-    if (column != colType && ! e.mods.isPopupMenu() && table.getNumSelectedRows() == 1)
+    if (row < 0 || row >= model.size())
+        return;
+
+    if (column == colStars && ! e.mods.isPopupMenu())
+    {
+        // the stars are drawn one by one: the one that was hit gives the rating, hitting the current rating again clears it
+        // e is relative to the row, whose x axis is the header's: the column's left edge comes from the header
+        const auto& header = table.getHeader();
+        const auto cellLeft = header.getColumnPosition (header.getIndexOfColumnId (column, true)).getX();
+        const auto star = (e.x - cellLeft - starsLeft) / starWidth;
+        if (star >= 0 && star < 5 && onRatingChosen)
+            onRatingChosen (rowsFor (row), model[row].rating == star + 1 ? 0 : star + 1);
+        return;
+    }
+
+    if (column == colNg && ! e.mods.isPopupMenu())
+    {
+        if (onNgChosen)
+            onNgChosen (rowsFor (row), ! model[row].ng);
+        return;
+    }
+
+    if (column != colType && column != colAttr && ! e.mods.isPopupMenu() && table.getNumSelectedRows() == 1)
         firePreview (row);
+}
+
+void CycleList::cellDoubleClicked (int row, int column, const juce::MouseEvent&)
+{
+    if (column == colAttr && row >= 0 && row < model.size() && onEditAttributes)
+        onEditAttributes (rowsFor (row));
 }
 
 //==============================================================================
@@ -172,11 +213,40 @@ void CycleList::paintCell (juce::Graphics& g, int row, int column, int width, in
             g.drawText (text, 4, 0, width - 8, height, juce::Justification::centredLeft, true);
             return;
         }
+        case colAttr:
+            g.setColour (c.ng ? theme::textDim : theme::text);
+            g.setFont (juce::FontOptions ("Meiryo UI", 13.0f, juce::Font::plain));
+            g.drawText (c.attributes, 4, 0, width - 8, height, juce::Justification::centredLeft, true);
+            return;
+        case colStars:
+        {
+            g.setFont (juce::FontOptions ("Meiryo UI", 14.0f, juce::Font::plain));
+            for (int i = 0; i < 5; ++i)
+            {
+                const auto on = i < c.rating;
+                g.setColour (on ? (c.ng ? juce::Colour (0xff8a7a3a) : juce::Colour (0xffffc533)) : theme::outline.brighter (0.2f));
+                g.drawText (on ? WT_U8 ("★") : WT_U8 ("☆"), starsLeft + i * starWidth, 0, starWidth, height, juce::Justification::centred);
+            }
+            return;
+        }
+        case colNg:
+            if (c.ng)
+            {
+                g.setColour (juce::Colour (0xffe05a6c));
+                g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+                g.drawText ("NG", 0, 0, width, height, juce::Justification::centred);
+            }
+            else
+            {
+                g.setColour (theme::outline.brighter (0.2f));
+                g.drawText (WT_U8 ("—"), 0, 0, width, height, juce::Justification::centred);
+            }
+            return;
         case colName:     text = model.nameOf (row) + ".wav"; break;
         default:          return;
     }
 
-    g.setColour (column == colName ? theme::text : theme::textDim.brighter (0.3f));
+    g.setColour (c.ng ? theme::textDim.darker (0.3f) : column == colName ? theme::text : theme::textDim.brighter (0.3f));
     g.setFont (juce::FontOptions (column == colStart ? "Consolas" : "Meiryo UI", 13.0f, juce::Font::plain));
     g.drawText (text, column == colIndex ? 10 : 4, 0, width - 8, height, juce::Justification::centredLeft, true);
 }

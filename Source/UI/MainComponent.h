@@ -9,6 +9,7 @@
 #include "Core/Suggester.h"
 #include "Core/CategoryProfiles.h"
 #include "Core/ConditioningPreview.h"
+#include "Core/Exporter.h"
 #include "Core/CycleModel.h"
 #include "Core/EmbeddedState.h"
 #include "Core/LibraryIndex.h"
@@ -69,6 +70,9 @@ public:
     juce::String testSelectionGain() { return selectionGainText(); }
     juce::String testSummary() const { return conditioningSummary(); }
     void testRefreshListening() { refreshListening(); }
+    void testSelectRows (const juce::Array<int>& rows) { list.selectRows (rows); }
+    void testSetCursor (juce::int64 sample) { view.setCursor (sample); }
+    std::vector<ExportItem> testExportItems (int& untyped, int& ng) const { return collectExportItems (untyped, ng); }
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -99,6 +103,12 @@ private:
     void runAutoSplit (const AutoSplitParams& params);
     int importMarkers();
     void startExport();
+    /** What an export would write: typed, not NG. `untyped` / `ng` count the ones left out. */
+    std::vector<ExportItem> collectExportItems (int& untyped, int& ng) const;
+    juce::Array<int> targetRows() const;
+    void rateRows (int stars);
+    void toggleNgRows();
+    void editAttributes (const juce::Array<int>& rows);
     void showLibrary();
     void refreshLibraryInfo();
     void setLibraryRoots (const juce::StringArray& roots);

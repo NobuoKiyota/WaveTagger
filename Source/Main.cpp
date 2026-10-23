@@ -5,6 +5,7 @@
 #include "Core/LabelStore.h"
 #include "Core/Suggester.h"
 #include "Core/Clustering.h"
+#include "Core/Attributes.h"
 #include "Core/Conditioning.h"
 #include "Core/Exporter.h"
 #include "Core/FeatureStore.h"
@@ -14,6 +15,7 @@
 #include "Core/WavChunks.h"
 #include "Core/WavMarkers.h"
 #include "Core/Xlsx.h"
+#include "UI/AttributeEditor.h"
 #include "UI/CategoryPicker.h"
 #include "UI/InboxWindow.h"
 #include "UI/OrganizerWindow.h"
@@ -73,7 +75,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -84,6 +86,7 @@ public:
                                         : args[0] == "--selftest-checks" ? selfTestChecks()
                                         : args[0] == "--selftest-learn" ? selfTestLearn()
                                         : args[0] == "--selftest-condition" ? selfTestCondition()
+                                        : args[0] == "--selftest-rating" ? selfTestRating()
                                         : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
@@ -91,7 +94,7 @@ public:
             return;
         }
 
-        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-conditioning" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
+        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-conditioning" || args[0] == "--snapshot-attributes" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
         {
             snapshotComponent (args[0], toFile (args[1]));
             return;
@@ -193,6 +196,13 @@ private:
             hooks.getStatus = [] { return juce::String ("watching"); };
             content = std::make_unique<InboxPanel> (demoQueue, hooks);
         }
+        else if (mode == "--snapshot-attributes")
+        {
+            AttributeVocabulary vocab;
+            vocab.learn ("tool=hammer tool=hammer speaker=left");
+            auto editor = std::make_unique<AttributeEditor> (vocab, "strength=strong material=\"cardboard box\"  outdoor", 3, [] (const juce::String&) {});
+            content = std::move (editor);
+        }
         else if (mode == "--snapshot-conditioning")
         {
             ConditioningPanel::Hooks hooks;
@@ -213,7 +223,7 @@ private:
                 input->setCurrentTabIndex (tab.getIntValue());
             content = std::move (input);
         }
-        if (mode != "--snapshot-organizer" && mode != "--snapshot-conditioning")
+        if (mode != "--snapshot-organizer" && mode != "--snapshot-conditioning" && mode != "--snapshot-attributes")
             content->setSize (mode == "--snapshot-inbox" ? 1000 : picker ? 400 : 800, mode == "--snapshot-inbox" ? 460 : picker ? 560 : 580);
 
         const auto image = content->createComponentSnapshot (content->getLocalBounds());
@@ -2462,6 +2472,175 @@ private:
             const auto r16 = exportCycles (data, items3, base, 16, 2.0f, o);
             const auto s16 = load (base.getChildFile ("C/sixteen.wav"), bits);
             check (r16.written == 1 && bits == 16 && std::abs (db (samplePeak (s16)) - (-1.0)) < 0.01, "16-bit export (with dither) works and still lands on the target");
+        }
+
+        return ok;
+    }
+
+    bool selfTestRating()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        // ---- attribute text
+        {
+            const auto tags = parseAttributes ("  strength=strong   material=\"cardboard box\" outdoor ");
+            check (tags.size() == 3 && tags[0] == AttributeTag { "strength", "strong" } && tags[1] == AttributeTag { "material", "cardboard box" }
+                       && tags[2] == AttributeTag { "", "outdoor" },
+                   "attribute text is split into key=value words (quotes keep a space, a bare word has no key)");
+            check (formatAttributes (tags) == "strength=strong material=\"cardboard box\" outdoor", "and written back with quotes only where they are needed");
+            check (normaliseAttributes ("  a=1    b=2 ") == "a=1 b=2" && normaliseAttributes ("   ").isEmpty() && parseAttributes ("").empty(), "stray white space disappears, empty stays empty");
+            check (normaliseAttributes (normaliseAttributes ("x=\"a b\" y=2")) == normaliseAttributes ("x=\"a b\" y=2"), "normalising twice changes nothing");
+
+            auto text = withAttribute ("strength=weak speed=fast", "STRENGTH", "strong");
+            check (text == "strength=strong speed=fast", "setting a key again replaces its value in place (case does not matter)");
+            text = withAttribute (text, "mic", "contact");
+            check (text == "strength=strong speed=fast mic=contact", "a new key is appended");
+            check (withAttribute (text, "speed", "  ") == "strength=strong mic=contact", "an empty value removes the key");
+        }
+
+        // ---- vocabulary
+        {
+            AttributeVocabulary vocab;
+            const auto keys = vocab.keys();
+            check (keys.size() == 6 && keys[0] == "strength" && keys[5] == "distance", "the built-in keys are there from the start, in a fixed order");
+            check (vocab.valuesFor ("strength") == juce::StringArray ({ "weak", "medium", "strong" }), "with their typical values in natural order");
+
+            vocab.learn ("tool=hammer tool=hammer tool=saw speaker=left outdoor");
+            vocab.learn ("Speaker=right strength=strong");
+            const auto after = vocab.keys();
+            check (after.size() == 7 && after[6] == "speaker" && after.contains ("tool"), "keys that were used before are offered after the built-in ones");
+            check (vocab.valuesFor ("tool") == juce::StringArray ({ "hammer", "saw" }), "values come most used first");
+            check (vocab.valuesFor ("strength")[0] == "strong" && vocab.valuesFor ("strength").size() == 3, "a used built-in value moves up, the others stay on offer");
+            check (vocab.valuesFor ("speaker").size() == 2 && vocab.valuesFor ("nothing").isEmpty(), "keys are matched without regard to case; unknown keys have no values");
+        }
+
+        // ---- cycles: stars, NG, attributes, undo
+        {
+            CycleModel m;
+            m.setTypeName (0, "push");
+            m.add (1000, 2000, 0);
+            m.add (3000, 4000, 0);
+            m.add (5000, 6000, 0);
+
+            m.setRating ({ 0, 2 }, 4);
+            check (m[0].rating == 4 && m[1].rating == 0 && m[2].rating == 4, "stars go onto every selected cycle");
+            m.setRating ({ 0 }, 9);
+            check (m[0].rating == 5, "more than five stars is five");
+            m.setRating ({ 0 }, -3);
+            check (m[0].rating == 0, "and less than none is none");
+            m.undo();
+            check (m[0].rating == 5, "a rating change is one undo step");
+
+            m.setNg ({ 1, 2 }, true);
+            check (! m[0].ng && m[1].ng && m[2].ng, "NG goes onto every selected cycle");
+            m.undo();
+            check (! m[1].ng && ! m[2].ng, "and is one undo step");
+
+            m.setAttributes ({ 0, 1, 2 }, "strength=strong");
+            check (m[0].attributes == "strength=strong" && m[2].attributes == "strength=strong", "attributes can be set on several cycles at once");
+            m.undo();
+            check (m[0].attributes.isEmpty() && m[1].attributes.isEmpty(), "in one undo step");
+            m.setAttributes ({ 0 }, "x=1");
+            m.setAttributes ({ 0 }, "x=1");
+            m.undo();
+            check (m[0].attributes.isEmpty(), "setting the text a cycle already has adds no undo step of its own");
+
+            m.setRating ({ 1 }, 3);
+            m.setNg ({ 1 }, true);
+            m.setAttributes (1, "material=wood outdoor");
+
+            // survives the project file and the WAV's wtag chunk
+            CycleModel fromProject;
+            fromProject.setTypeName (0, "push");
+            fromProject.cyclesFromVar (juce::JSON::parse (juce::JSON::toString (m.cyclesToVar())));
+            check (fromProject.size() == 3 && fromProject[1].rating == 3 && fromProject[1].ng && fromProject[1].attributes == "material=wood outdoor"
+                       && fromProject[0].rating == 5 && ! fromProject[0].ng,
+                   "stars, NG and attributes survive the project file");
+
+            const auto request = buildEmbedRequest (m, 48000.0, "test");
+            WtagData wtag;
+            check (parseWtag (juce::JSON::parse (request.wtagJson), wtag) && wtag.cycles.size() == 3 && wtag.cycles[1].rating == 3 && wtag.cycles[1].ng
+                       && wtag.cycles[1].attributes == "material=wood outdoor",
+                   "and the WAV's wtag chunk");
+        }
+
+        // ---- shortcuts
+        {
+            KeyMap keys;
+            const auto ctrlKey = [] (int code) { return juce::KeyPress (code, juce::ModifierKeys::ctrlModifier, 0); };
+            bool rates = true;
+            for (int i = 0; i <= 5; ++i)
+                rates = rates && keys.find (ctrlKey ('0' + i)) == (Action) ((int) Action::Rate0 + i);
+            check (rates, "Ctrl+0..5 are the star keys");
+            check (keys.find (juce::KeyPress ('N', juce::ModifierKeys(), 'N')) == Action::ToggleNg && keys.find (juce::KeyPress ('E', juce::ModifierKeys(), 'E')) == Action::EditAttributes,
+                   "N toggles NG, E edits the attributes");
+            check (keys.find (juce::KeyPress ('3', juce::ModifierKeys(), '3')) == Action::Type3 && keys.find (ctrlKey ('3')) == Action::Rate3,
+                   "the digits alone are still the type keys");
+        }
+
+        // ---- the main window: keys act on the selection, export leaves NG out
+        {
+            const double sr = 48000.0;
+            auto source = std::make_shared<AudioData>();
+            source->sampleRate = sr;
+            source->bitsPerSample = 24;
+            source->buffer.setSize (1, (int) (sr * 6));
+            source->buffer.clear();
+            source->file = testRoot.getChildFile ("rating_test.wav");
+
+            MainComponent main;
+            main.testLoadAudio (source);
+            auto& cycles = main.testCyclesMutable();
+            cycles.setTypeName (0, "push");
+            cycles.setCategory ("");
+            for (int i = 0; i < 4; ++i)
+                cycles.add ((juce::int64) (sr * (0.5 + i * 1.2)), (juce::int64) (sr * (1.0 + i * 1.2)), i == 3 ? -1 : 0);
+
+            const auto press = [&] (int code, bool ctrl, juce::juce_wchar ch = 0) {
+                return main.keyPressed (juce::KeyPress (code, ctrl ? juce::ModifierKeys::ctrlModifier : juce::ModifierKeys(), ch));
+            };
+
+            main.testSelectRows ({ 0, 1 });
+            check (press ('3', true) && cycles[0].rating == 3 && cycles[1].rating == 3 && cycles[2].rating == 0, "Ctrl+3 gives the selected cycles three stars");
+            press ('0', true);
+            check (cycles[0].rating == 0 && cycles[1].rating == 0, "Ctrl+0 takes them off");
+
+            press ('N', false, 'N');
+            check (cycles[0].ng && cycles[1].ng && ! cycles[2].ng, "N marks the selection NG");
+            press ('N', false, 'N');
+            check (! cycles[0].ng && ! cycles[1].ng, "N again clears it");
+            cycles.setNg ({ 0 }, true);
+            press ('N', false, 'N');
+            check (cycles[0].ng && cycles[1].ng, "with a mixed selection N makes all of it NG");
+
+            main.testSelectRows ({});
+            main.testSetCursor ((juce::int64) (sr * 3.2));
+            press ('4', true);
+            check (cycles[2].rating == 4 && cycles[0].rating == 0, "with nothing selected the keys act on the cycle under the cursor");
+
+            cycles.setAttributes (2, "strength=strong material=\"cardboard box\"");
+            int untyped = 0, ng = 0;
+            const auto items = main.testExportItems (untyped, ng);
+            check (items.size() == 1 && untyped == 1 && ng == 2, "export leaves out the two NG cycles and the untyped one, and counts them");
+            check (items.size() == 1 && items[0].comment.contains ("rating=4") && items[0].comment.contains ("attrs=strength=strong material=\"cardboard box\""),
+                   "the stars and attributes go into the exported file's comment");
+
+            cycles.setNg ({ 0, 1 }, false);
+            cycles.setRating ({ 0 }, 0);
+            const auto all = main.testExportItems (untyped, ng);
+            check (all.size() == 3 && ng == 0 && ! all[0].comment.contains ("rating=") && ! all[0].comment.contains ("attrs="),
+                   "nothing is added to the comment when there are no stars or attributes");
         }
 
         return ok;
