@@ -23,6 +23,7 @@ const Info infos[numActions] = {
     { "zoomSelection", "選択範囲にズーム" }, { "toggleLoop", "ループ切替" },        { "zoomIn", "拡大 (時間)" },
     { "zoomOut", "縮小 (時間)" },          { "scrollLeft", "左へスクロール" },     { "scrollRight", "右へスクロール" },
     { "autoSplit", "自動分割" },           { "importMarkers", "マーカー読み込み" },
+    { "saveWav", "WAV にマーカーを書き込む" },
     { "type1", "Type 1" }, { "type2", "Type 2" }, { "type3", "Type 3" }, { "type4", "Type 4" }, { "type5", "Type 5" },
     { "type6", "Type 6" }, { "type7", "Type 7" }, { "type8", "Type 8" }, { "type9", "Type 9" },
 };
@@ -50,6 +51,7 @@ void KeyMap::reset()
     set (Action::Open, { ctrl ('O') });
     set (Action::Library, { ctrl ('L') });
     set (Action::Export, { ctrl ('E') });
+    set (Action::SaveWav, { ctrl ('S') });
     set (Action::SelectAll, { ctrl ('A') });
     set (Action::Undo, { ctrl ('Z') });
     set (Action::Redo, { ctrl ('Y'), juce::KeyPress ('Z', juce::ModifierKeys::ctrlModifier | juce::ModifierKeys::shiftModifier, 0) });

@@ -10,7 +10,7 @@ enum class Action
     Open, Library, Export, SelectAll, Undo, Redo,
     PlayStop, Confirm, Cancel, Delete,
     ToStart, ToEnd, ZoomFit, ZoomSelection, ToggleLoop, ZoomIn, ZoomOut, ScrollLeft, ScrollRight,
-    AutoSplit, ImportMarkers,
+    AutoSplit, ImportMarkers, SaveWav,
     Type1, Type2, Type3, Type4, Type5, Type6, Type7, Type8, Type9,
     Count
 };

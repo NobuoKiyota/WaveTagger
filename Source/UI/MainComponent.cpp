@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "Core/Exporter.h"
+#include "Core/WavChunks.h"
 #include "Core/Categories.h"
 #include "Core/Persistence.h"
 #include "Core/WavMarkers.h"
@@ -37,14 +38,8 @@ MainComponent::MainComponent()
 
     openButton.onClick = [this] { showOpenDialog(); };
     audioButton.onClick = [this] { showAudioSettings(); };
-    importButton.onClick = [this] {
-        if (audio == nullptr)
-            return;
-        const auto n = importMarkers();
-        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Import markers",
-                                                n > 0 ? juce::String (n) + WT_U8 (" 件のマーカーを読み込みました (Ctrl+Z で元に戻せます)")
-                                                      : WT_U8 ("この WAV にはマーカー(cue)が見つかりませんでした"));
-    };
+    importButton.setButtonText (juce::String ("Markers ") + WT_U8 ("▾"));
+    importButton.onClick = [this] { showMarkersMenu(); };
     splitButton.onClick = [this] { if (audio != nullptr) showAutoSplitDialog(); };
     exportButton.onClick = [this] { if (audio != nullptr) startExport(); };
     libraryButton.onClick = [this] { showLibrary(); };
@@ -222,6 +217,7 @@ void MainComponent::loadSettings()
     catalog.setDirectory (savedDir.isNotEmpty() ? juce::File (savedDir) : Catalog::defaultDirectory());
 
     exportDir = juce::File (s.getProperty ("exportDir", "").toString());
+    rawDir = juce::File (s.getProperty ("rawDir", "").toString());
     migrationDeclined = (bool) s.getProperty ("configMigrationDeclined", false);
 
     // Shared settings come from the config folder. The first time, carry over what this PC had in settings.json.
@@ -272,6 +268,7 @@ void MainComponent::saveNow()
     // this PC only: where things are on this machine
     auto* local = new juce::DynamicObject();
     local->setProperty ("exportDir", exportDir.getFullPathName());
+    local->setProperty ("rawDir", rawDir.getFullPathName());
     local->setProperty ("configDir", catalog.getDirectory().getFullPathName());
     local->setProperty ("configMigrationDeclined", migrationDeclined);
 
@@ -361,15 +358,30 @@ void MainComponent::audioLoaded (AudioDataPtr data, const juce::String& error)
 
     auto label = audio->file.getFullPathName();
 
-    const auto project = readJson (getProjectFileFor (audio->file));
-    if (project.isObject() && project.hasProperty ("cycles") && snapshotOutput == juce::File())
+    // Where do this file's cycles come from? The WAV itself (wtag chunk) or this PC's project file, whichever was saved later.
+    const auto realRun = snapshotOutput == juce::File();
+    const auto projectFile = getProjectFileFor (audio->file);
+    const auto project = realRun ? readJson (projectFile) : juce::var();
+    const auto hasProject = project.isObject() && project.hasProperty ("cycles");
+
+    juce::var wtagJson;
+    WtagData embedded;
+    const auto hasEmbedded = realRun && readWtag (audio->file, wtagJson) && parseWtag (wtagJson, embedded);
+
+    if (preferEmbedded (hasEmbedded, embedded.savedAt, hasProject, projectFile.getLastModificationTime().toMilliseconds()))
+    {
+        const auto added = applyEmbeddedState (embedded);
+        label += WT_U8 ("   (WAV に埋め込まれた情報を読み込み: ") + juce::String ((int) embedded.cycles.size()) + WT_U8 (" 件")
+                 + (added > 0 ? WT_U8 (", Type 名 ") + juce::String (added) + WT_U8 (" 個をパレットに追加") : juce::String()) + ")";
+    }
+    else if (hasProject)
     {
         cycles.cyclesFromVar (project.getProperty ("cycles", {}));
     }
     else
     {
         cycles.replaceAll ({}, false);
-        const auto n = snapshotOutput == juce::File() ? importMarkers() : 0;
+        const auto n = realRun ? importMarkers() : 0;
         if (n > 0)
             label += WT_U8 ("   (WAV 内のマーカー ") + juce::String (n) + WT_U8 (" 件を読み込み)");
     }
@@ -955,6 +967,204 @@ void MainComponent::refreshLibraryInfo()
 }
 
 //==============================================================================
+// Markers inside the WAV
+//==============================================================================
+void MainComponent::showMarkersMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, WT_U8 ("WAV 内のマーカーを読み込む (RX など)"), audio != nullptr);
+    menu.addItem (2, WT_U8 ("WAV にマーカーを書き込む   ") + keyMap.describe (Action::SaveWav), audio != nullptr);
+    menu.addSeparator();
+    menu.addItem (3, WT_U8 ("Raw フォルダ: ") + (rawDir.getFullPathName().isEmpty() ? WT_U8 ("(未設定)") : rawDir.getFullPathName()) + WT_U8 ("  を変更..."));
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&importButton), [safe] (int result) {
+        if (safe == nullptr)
+            return;
+        if (result == 1)
+            safe->doImportMarkers();
+        else if (result == 2)
+            safe->saveMarkersToWav();
+        else if (result == 3)
+            safe->chooseRawFolder ({});
+    });
+}
+
+void MainComponent::doImportMarkers()
+{
+    if (audio == nullptr)
+        return;
+
+    const auto n = importMarkers();
+    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Import markers",
+                                            n > 0 ? juce::String (n) + WT_U8 (" 件のマーカーを読み込みました (Ctrl+Z で元に戻せます)")
+                                                  : WT_U8 ("この WAV にはマーカー(cue)が見つかりませんでした"));
+}
+
+bool MainComponent::isInRawFolder (const juce::File& f) const
+{
+    return rawDir.getFullPathName().isNotEmpty() && f.isAChildOf (rawDir);
+}
+
+void MainComponent::chooseRawFolder (std::function<void()> then)
+{
+    auto start = rawDir;
+    if (! start.isDirectory())
+        start = juce::File ("G:\\SFX_Library").isDirectory() ? juce::File ("G:\\SFX_Library") : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    chooser = std::make_unique<juce::FileChooser> (WT_U8 ("Raw フォルダを選択 (元の録音のコピーを、年ごとのサブフォルダに保管します)"), start);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [this, then = std::move (then)] (const juce::FileChooser& fc) {
+                              const auto dir = fc.getResult();
+                              if (! dir.isDirectory())
+                                  return;
+                              rawDir = dir;
+                              scheduleSave();
+                              if (then)
+                                  then();
+                          });
+}
+
+juce::File MainComponent::uniqueRawDestination (const juce::File& source) const
+{
+    const auto year = juce::String (juce::Time::getCurrentTime().getYear());
+    const auto folder = rawDir.getChildFile (year);
+
+    auto dest = folder.getChildFile (source.getFileName());
+    for (int i = 1; dest.exists(); ++i)
+        dest = folder.getChildFile (source.getFileNameWithoutExtension() + "_" + juce::String (i) + source.getFileExtension());
+    return dest;
+}
+
+void MainComponent::saveMarkersToWav()
+{
+    if (audio == nullptr || embedding)
+        return;
+
+    if (cycles.size() == 0)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, WT_U8 ("WAV に書き込む"),
+                                                WT_U8 ("サイクルがまだありません。範囲を選んで数字キーで打ってから、もう一度お試しください。"));
+        return;
+    }
+
+    const auto source = audio->file;
+    if (! source.hasFileExtension ("wav"))
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, WT_U8 ("WAV に書き込む"),
+                                                WT_U8 ("マーカーを書き込めるのは WAV ファイルだけです (") + source.getFileName() + WT_U8 (")。"));
+        return;
+    }
+
+    // a recording already kept in the Raw folder is updated in place
+    if (isInRawFolder (source))
+    {
+        embedNow (source, source, false);
+        return;
+    }
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::AlertWindow::showYesNoCancelBox (
+        juce::MessageBoxIconType::QuestionIcon, WT_U8 ("WAV にマーカーを書き込む"),
+        WT_U8 ("このファイルは Raw フォルダの外にあります:\n") + source.getFullPathName()
+            + WT_U8 ("\n\n・Raw にコピーして書き込む (おすすめ): 元の録音はそのまま残し、コピーにだけ書き込んで、以後はそのコピーを編集します\n"
+                     "・元のファイルに書き込む: この録音そのものに書き込みます (音声データは変わりません)"),
+        WT_U8 ("Raw にコピーして書き込む"), WT_U8 ("元のファイルに書き込む"), WT_U8 ("キャンセル"), this,
+        juce::ModalCallbackFunction::create ([safe, source] (int result) {
+            if (safe == nullptr || result == 0)
+                return;
+
+            if (result == 2)
+            {
+                safe->embedNow (source, source, false);
+                return;
+            }
+
+            const auto copyIn = [safe, source] {
+                if (safe != nullptr)
+                    safe->embedNow (source, safe->uniqueRawDestination (source), true);
+            };
+
+            if (safe->rawDir.getFullPathName().isEmpty())
+                safe->chooseRawFolder (copyIn);
+            else
+                copyIn();
+        }));
+}
+
+void MainComponent::embedNow (const juce::File& source, const juce::File& dest, bool switchToDest)
+{
+    embedding = true;
+    const auto request = buildEmbedRequest (cycles, audio->sampleRate, JUCE_APPLICATION_VERSION_STRING);
+    fileLabel.setText (WT_U8 ("WAV に書き込み中... ") + dest.getFileName(), juce::dontSendNotification);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    loader.addJob ([safe, source, dest, request, switchToDest] {
+        if (dest != source)
+            dest.getParentDirectory().createDirectory();
+
+        const auto result = embedMarkers (source, dest, request);
+        juce::MessageManager::callAsync ([safe, result, dest, switchToDest] {
+            if (safe != nullptr)
+                safe->embedFinished (result, dest, switchToDest);
+        });
+    });
+}
+
+void MainComponent::embedFinished (const EmbedResult& result, const juce::File& dest, bool switchToDest)
+{
+    embedding = false;
+    fileLabel.setText (audio != nullptr ? audio->file.getFullPathName() : juce::String(), juce::dontSendNotification);
+
+    if (! result.ok)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, WT_U8 ("WAV に書き込めませんでした"),
+                                                result.error + WT_U8 ("\n\n元のファイルは変更されていません。"));
+        return;
+    }
+
+    const auto message = juce::String (result.regionsWritten) + WT_U8 (" 件のマーカーを書き込みました。\n") + dest.getFullPathName()
+                         + (switchToDest ? WT_U8 ("\n\n元の録音は変更していません。以後は、このコピーを編集しています。")
+                                         : WT_U8 ("\n\n音声データは変わっていません (書き込み後に照合済み)。RX など他のソフトでも、リージョンとして見えます。"));
+
+    if (switchToDest)
+        openFile (dest); // the cycles come back from the wtag chunk
+
+    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, WT_U8 ("WAV に書き込みました"), message);
+}
+
+/** Puts the cycles stored in a WAV into the editor. Types are matched to the palette by NAME (slot numbers may differ
+    between PCs / sessions); a type the palette does not have yet takes the first free slot so nothing is lost. */
+int MainComponent::applyEmbeddedState (const WtagData& data)
+{
+    int added = 0;
+    std::vector<Cycle> restored;
+
+    for (const auto& c : data.cycles)
+    {
+        int slot = -1;
+        if (c.typeName.isNotEmpty())
+        {
+            for (int i = 0; i < CycleModel::numSlots && slot < 0; ++i)
+                if (cycles.getType (i).name.equalsIgnoreCase (c.typeName))
+                    slot = i;
+
+            for (int i = 0; i < CycleModel::numSlots && slot < 0; ++i)
+                if (cycles.getType (i).name.isEmpty())
+                {
+                    cycles.setTypeName (i, c.typeName);
+                    slot = i;
+                    ++added;
+                }
+        }
+        restored.push_back ({ c.start, c.end, slot });
+    }
+
+    cycles.replaceAll (std::move (restored), false);
+    return added;
+}
+
+//==============================================================================
 void MainComponent::showOpenDialog()
 {
     chooser = std::make_unique<juce::FileChooser> (WT_U8 ("音声ファイルを開く"), juce::File(), formats.getWildcardForAllFormats());
@@ -998,7 +1208,7 @@ void MainComponent::resized()
     bar.removeFromLeft (6);
     audioButton.setBounds (bar.removeFromLeft (66));
     bar.removeFromLeft (12);
-    importButton.setBounds (bar.removeFromLeft (104));
+    importButton.setBounds (bar.removeFromLeft (90));
     bar.removeFromLeft (6);
     splitButton.setBounds (bar.removeFromLeft (76));
     bar.removeFromLeft (6);
@@ -1088,7 +1298,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         case Action::ScrollLeft:    view.scrollPixels (-view.getWidth() * 0.1); break;
         case Action::ScrollRight:   view.scrollPixels (view.getWidth() * 0.1); break;
         case Action::AutoSplit:     showAutoSplitDialog(); break;
-        case Action::ImportMarkers: importButton.onClick(); break;
+        case Action::ImportMarkers: doImportMarkers(); break;
+        case Action::SaveWav:       saveMarkersToWav(); break;
         default:
             if (action >= Action::Type1 && action <= Action::Type9)
                 handleTypeKey ((int) action - (int) Action::Type1);

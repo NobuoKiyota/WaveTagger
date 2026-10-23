@@ -1,5 +1,8 @@
 #include "Core/Catalog.h"
 #include "Core/TextDecode.h"
+#include "Core/EmbeddedState.h"
+#include "Core/WavChunks.h"
+#include "Core/WavMarkers.h"
 #include "Core/Xlsx.h"
 #include "UI/CategoryPicker.h"
 #include "UI/InputSettings.h"
@@ -56,11 +59,13 @@ public:
             return;
         }
 
-        if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"))
+        if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
+                                 || args[0] == "--selftest-wav"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
-                                                                          : selfTestCatalogLoad()) ? 0 : 1);
+                                        : args[0] == "--selftest-wav" ? selfTestWav()
+                                                                       : selfTestCatalogLoad()) ? 0 : 1);
             quit();
             return;
         }
@@ -332,6 +337,191 @@ private:
             for (const auto& c : m.testCatalog().getCategories())
                 adopted = adopted || c.name == "ONLYTHERE";
             check (adopted, "an existing workbook in the chosen folder is adopted, not overwritten");
+        }
+        return ok;
+    }
+
+    /** Marker embedding: audio untouched, other chunks kept, markers readable, bad files refused. */
+    bool selfTestWav()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        const auto dir = testRoot.getChildFile ("wav");
+        dir.deleteRecursively();
+        dir.createDirectory();
+
+        // a 24-bit stereo test file that already carries an INFO comment (must survive)
+        const auto src = dir.getChildFile ("src.wav");
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> stream (src.createOutputStream());
+            std::unordered_map<juce::String, juce::String> meta;
+            meta[juce::WavAudioFormat::riffInfoComment] = "original comment";
+            auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions {}.withSampleRate (48000.0).withNumChannels (2)
+                                                          .withBitsPerSample (24).withMetadataValues (meta));
+            juce::AudioBuffer<float> buf (2, 48000 * 2 + 7); // odd length on purpose
+            juce::Random rnd (1234);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < buf.getNumSamples(); ++i)
+                    buf.setSample (ch, i, rnd.nextFloat() * 1.6f - 0.8f);
+            writer->writeFromAudioSampleBuffer (buf, 0, buf.getNumSamples());
+        }
+        const auto srcBackup = dir.getChildFile ("src_before.wav");
+        src.copyFileTo (srcBackup);
+        check (listChunkIds (src).contains ("LIST:INFO"), "test file has an INFO chunk to preserve");
+
+        // cycles through the real model so buildEmbedRequest is covered too
+        CycleModel model;
+        model.setTypeName (0, "push");
+        model.setTypeName (1, "pull");
+        model.setPrefix ("pen");
+        model.add (4800, 24000, 0);
+        model.add (30000, 41001, 1);
+        model.add (50001, 60000, -1);
+        const auto request = buildEmbedRequest (model, 48000.0, "test");
+
+        const auto readAll = [] (const juce::File& f, juce::AudioBuffer<float>& out, juce::StringPairArray* meta = nullptr) {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::AudioFormatReader> r (wav.createReaderFor (f.createInputStream().release(), true));
+            if (r == nullptr)
+                return false;
+            out.setSize ((int) r->numChannels, (int) r->lengthInSamples);
+            r->read (&out, 0, (int) r->lengthInSamples, 0, true, true);
+            if (meta != nullptr)
+                *meta = r->metadataValues;
+            return true;
+        };
+
+        // 1. copy + embed
+        const auto dest = dir.getChildFile ("dest.wav");
+        const auto result = embedMarkers (src, dest, request);
+        check (result.ok && result.regionsWritten == 3, "embed into a copy succeeds");
+        const auto ids = listChunkIds (dest);
+        check (ids.contains ("fmt ") && ids.contains ("data") && ids.contains ("cue ") && ids.contains ("LIST:adtl") && ids.contains ("wtag"),
+               "cue, adtl and wtag chunks are present");
+        check (ids.contains ("LIST:INFO"), "the existing INFO chunk is kept");
+        check (src.hasIdenticalContentTo (srcBackup), "the source file was not touched");
+
+        juce::AudioBuffer<float> a, b;
+        juce::StringPairArray metaSrc, meta;
+        check (readAll (src, a, &metaSrc) && readAll (dest, b, &meta) && a.getNumSamples() == b.getNumSamples(), "same length after embedding");
+        bool identical = a.getNumChannels() == b.getNumChannels();
+        for (int ch = 0; identical && ch < a.getNumChannels(); ++ch)
+            for (int i = 0; identical && i < a.getNumSamples(); ++i)
+                identical = a.getSample (ch, i) == b.getSample (ch, i);
+        check (identical, "every audio sample is identical");
+        bool allKept = metaSrc.size() > 0;
+        for (const auto& key : metaSrc.getAllKeys()) // the reader also lists the new cue points, so compare what was there before
+            allKept = allKept && meta.getValue (key, "<missing>") == metaSrc.getValue (key, "");
+        check (allKept, "every metadata entry the file had before still reads back the same");
+
+        // 2. markers are readable like RX would (cue + labl + ltxt)
+        const auto markers = readWavMarkers (dest);
+        check (markers.size() == 3 && markers[0].label == "pen_push01" && markers[0].start == 4800 && markers[0].length == 19200
+                   && markers[1].label == "pen_pull01" && markers[1].start == 30000 && markers[1].length == 11001
+                   && markers[2].label == "pen_untyped01" && markers[2].length == 9999,
+               "regions come back with names, starts and lengths (including odd-length labels)");
+
+        // 3. the wtag chunk restores the full state
+        juce::var json;
+        WtagData data;
+        check (readWtag (dest, json) && parseWtag (json, data) && data.cycles.size() == 3 && data.cycles[0].typeName == "push"
+                   && data.cycles[2].typeName.isEmpty() && data.schema == currentWtagSchema && data.savedAt > 0,
+               "wtag chunk parses: 3 cycles, type names, schema, timestamp");
+        dest.copyFileTo (dir.getChildFile ("keep_for_python.wav"));
+
+        // 4. embedding again replaces, never duplicates; in place is allowed
+        EmbedRequest second;
+        second.regions = { { 100, 200, "x" }, { 1000, 50, "yy" } };
+        second.wtagJson = "{\"schema\":1,\"cycles\":[]}";
+        check (embedMarkers (dest, dest, second).ok, "embedding in place succeeds");
+        const auto ids2 = listChunkIds (dest);
+        const auto countOf = [] (const juce::StringArray& a, const juce::String& id) {
+            int n = 0;
+            for (const auto& x : a)
+                n += x == id ? 1 : 0;
+            return n;
+        };
+        check (countOf (ids2, "cue ") == 1 && countOf (ids2, "wtag") == 1 && countOf (ids2, "LIST:adtl") == 1 && readWavMarkers (dest).size() == 2,
+               "old markers were replaced, not duplicated");
+        juce::AudioBuffer<float> c;
+        readAll (dest, c);
+        identical = c.getNumSamples() == a.getNumSamples();
+        for (int ch = 0; identical && ch < a.getNumChannels(); ++ch)
+            for (int i = 0; identical && i < a.getNumSamples(); ++i)
+                identical = a.getSample (ch, i) == c.getSample (ch, i);
+        check (identical, "audio still identical after the in-place rewrite");
+
+        // 5. an empty request removes the markers (and still verifies)
+        check (embedMarkers (dest, dest, {}).ok && ! listChunkIds (dest).contains ("cue ") && ! listChunkIds (dest).contains ("wtag"),
+               "an empty request cleanly removes markers");
+
+        // 6. files that must be refused are left alone
+        {
+            const auto rf64 = dir.getChildFile ("rf64.wav");
+            juce::MemoryOutputStream o;
+            o.write ("RF64", 4);
+            o.writeInt (-1);
+            o.write ("WAVE", 4);
+            o.write ("ds64", 4);
+            rf64.replaceWithData (o.getData(), o.getDataSize());
+            const auto out = dir.getChildFile ("rf64_out.wav");
+            const auto r = embedMarkers (rf64, out, request);
+            check (! r.ok && ! out.exists(), "RF64 is refused and nothing is written");
+
+            const auto trunc = dir.getChildFile ("trunc.wav");
+            src.copyFileTo (trunc);
+            {
+                juce::FileOutputStream t (trunc);
+                t.setPosition (trunc.getSize() - 50);
+                t.truncate();
+            }
+            const auto before = dir.getChildFile ("trunc_before.wav");
+            trunc.copyFileTo (before);
+            const auto r2 = embedMarkers (trunc, trunc, request);
+            check (! r2.ok && trunc.hasIdenticalContentTo (before), "a truncated file is refused and left exactly as it was");
+            check (dir.findChildFiles (juce::File::findFiles, false, "*.wtmp~").isEmpty(), "no temporary files are left behind");
+
+            const auto notWav = dir.getChildFile ("note.wav");
+            notWav.replaceWithText ("hello");
+            check (! embedMarkers (notWav, notWav, request).ok && notWav.loadFileAsString() == "hello", "a non-WAV file is refused and unchanged");
+        }
+
+        // 6b. WAV vs local project: the later save wins
+        check (preferEmbedded (true, 2000, false, 0) && preferEmbedded (true, 2000, true, 1000) && ! preferEmbedded (true, 1000, true, 2000)
+                   && ! preferEmbedded (false, 5000, true, 1000) && ! preferEmbedded (false, 0, false, 0),
+               "WAV information wins only when it is newer than this PC's project (or there is no project)");
+
+        // 7. restoring into the palette matches types by NAME and never loses one
+        {
+            testRoot.getChildFile ("settings.json").replaceWithText ("{\"libraryRoots\":[\"Z:\\\\none\"]}");
+            MainComponent m;
+            auto& cy = m.testCyclesMutable();
+            cy.setTypeName (0, "pull");
+            cy.setTypeName (1, "open");
+            cy.setTypeName (2, "write");
+            for (int i = 3; i < CycleModel::numSlots; ++i)
+                cy.setTypeName (i, {});
+
+            WtagData d;
+            d.schema = 1;
+            d.cycles = { { 0, 100, 2, "write", "" }, { 200, 300, 0, "PULL", "" }, { 400, 500, 7, "Hammer", "" }, { 600, 700, -1, "", "" } };
+            const auto added = m.testApplyEmbedded (d);
+            check (added == 1, "a type the palette lacks is added (once)");
+            check (m.testCycles()[0].type == 2 && m.testCycles()[1].type == 0 && m.testCycles()[2].type == 3 && m.testCycles()[3].type == -1,
+                   "types are matched by name (case-insensitive), not by the stored slot number");
+            check (m.testCycles().getType (3).name == "Hammer", "the new type name took the first free slot");
         }
         return ok;
     }

@@ -22,3 +22,10 @@
 - `preferences.json` が読めない時 (Drive 同期中など) は上書きしない。保存の初回に `.bak-<時刻>` を 1 つ作り、`.bak-*` は新しい 5 つだけ残す。Drive の競合コピー (`catalog (1).xlsx` 等) は警告表示
 - 設定フォルダの変更 (`設定` ダイアログの「設定フォルダ」タブ): コピーのみ・上書き/削除なし。移動先にすでに設定があればそれを採用
 - 検証: `--selftest-prefs` (設定の分割・上書き防止・フォルダ移動 12 項目)、`--selftest-catalog` (26 項目)。`WT_DEMO_TAB=0/1/2` で `--snapshot-input` のタブを選べる
+
+## WAV へのマーカー埋め込み (`Markers ▾` メニュー / Ctrl+S)
+- `Core/WavChunks`: `cue ` + `LIST/adtl` (labl, ltxt = RX 等でリージョンとして見える) + 独自 `wtag` チャンク (JSON, schema 1。タイプ名・番号・出力名・savedAt)。既存の他チャンク (fmt/data/bext/iXML/smpl/INFO...) は**バイト単位でそのまま**コピー。1MB ごとのストリーム処理
+- 書き込みは隣に一時ファイルを作り、fmt と data を元と照合してから置き換える (失敗しても既存ファイルは壊れない)。RF64 / 4GB 超 / 壊れたファイルは拒否
+- 開く時は WAV 内の `wtag` と PC のプロジェクト (`%APPDATA%\WaveTagger\projects`) の**新しい方**を採用 (`preferEmbedded`)。タイプは**名前**でパレットに対応付け、無ければ空き枠に追加
+- Raw フォルダの外の WAV は「Raw にコピーして書き込む(推奨) / 元に書き込む / キャンセル」を確認。Raw 内の WAV は直接更新。Raw の場所は PC ごと (`settings.json` の `rawDir`、初回に選択)
+- 検証: `--selftest-wav` (22 項目: 音声サンプル完全一致・他チャンク保持・拒否ケース・名前での対応付けなど)。`riff_check.py` 相当の独立確認は Python の `wave` / 手書き RIFF パーサで行った

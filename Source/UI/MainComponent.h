@@ -3,6 +3,7 @@
 #include "Core/AutoSplit.h"
 #include "Core/Catalog.h"
 #include "Core/CycleModel.h"
+#include "Core/EmbeddedState.h"
 #include "Core/LibraryIndex.h"
 #include "Core/PlaybackEngine.h"
 #include "Core/SpectrogramRenderer.h"
@@ -39,6 +40,8 @@ public:
     bool testPrefsLoadFailed() const { return prefsLoadFailed; }
     juce::String testChangeFolder (const juce::File& dir) { return changeConfigFolder (dir); }
     const Catalog& testCatalog() const { return catalog; }
+    int testApplyEmbedded (const WtagData& d) { return applyEmbeddedState (d); }
+    CycleModel& testCyclesMutable() { return cycles; }
     const CycleModel& testCycles() const { return cycles; }
 
     void paint (juce::Graphics& g) override;
@@ -76,6 +79,15 @@ private:
     void afterExport (const juce::File& destFolder);
     void showInputSettings();
     void applySharedPreferences (const juce::var& prefs);
+    void doImportMarkers();
+    void showMarkersMenu();
+    void saveMarkersToWav();
+    void chooseRawFolder (std::function<void()> then);
+    bool isInRawFolder (const juce::File& f) const;
+    juce::File uniqueRawDestination (const juce::File& source) const;
+    void embedNow (const juce::File& source, const juce::File& dest, bool switchToDest);
+    void embedFinished (const EmbedResult& result, const juce::File& dest, bool switchToDest);
+    int applyEmbeddedState (const WtagData& data);
     juce::String changeConfigFolder (const juce::File& newDir);
     void offerConfigMigration();
     void updateHint();
@@ -115,7 +127,8 @@ private:
     std::unique_ptr<juce::VBlankAttachment> vblank;
     juce::String statusText;
     bool wasPlaying = false;
-    juce::File snapshotOutput, exportDir;
+    juce::File snapshotOutput, exportDir, rawDir;
+    bool embedding = false;
     int saveGeneration = 0;
     juce::String lastInfoKey;
     int snapshotWaits = 0;
