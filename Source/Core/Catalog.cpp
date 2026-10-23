@@ -223,7 +223,7 @@ void seedRows (std::vector<juce::StringArray>& categoryRows, std::vector<juce::S
 
     typeRows = { { "Category", "Type", "Japanese", "Note" } };
     for (const auto& t : seedTypes)
-        typeRows.push_back ({ t.category, t.name, t.jp, "" });
+        typeRows.push_back ({ t.category, t.name, juce::String::fromUTF8 (t.jp), "" }); // (a plain String from the literal would read the UTF-8 bytes as Latin-1)
 }
 } // namespace
 

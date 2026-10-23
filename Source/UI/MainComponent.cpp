@@ -45,7 +45,8 @@ MainComponent::MainComponent()
     importButton.setButtonText (juce::String ("Markers ") + WT_U8 ("▾"));
     importButton.onClick = [this] { showMarkersMenu(); };
     splitButton.onClick = [this] { if (audio != nullptr) showAutoSplitDialog(); };
-    exportButton.onClick = [this] { if (audio != nullptr) startExport(); };
+    exportButton.setButtonText (juce::String ("Export ") + WT_U8 ("▾"));
+    exportButton.onClick = [this] { showExportMenu(); };
     libraryButton.onClick = [this] {
         juce::PopupMenu menu;
         menu.addItem (1, WT_U8 ("ライブラリ検索   ") + keyMap.describe (Action::Library));
@@ -267,6 +268,7 @@ void MainComponent::loadSettings()
     rawDir = juce::File (s.getProperty ("rawDir", "").toString());
     inboxDir = juce::File (s.getProperty ("inboxDir", "").toString());
     organizedDir = juce::File (s.getProperty ("organizedDir", "").toString());
+    datasetDir = juce::File (s.getProperty ("datasetDir", "").toString());
     inboxWatch = (bool) s.getProperty ("inboxWatch", false);
     backlogDecidedFor = s.getProperty ("inboxBacklogDecidedFor", "").toString();
     migrationDeclined = (bool) s.getProperty ("configMigrationDeclined", false);
@@ -329,6 +331,7 @@ void MainComponent::saveNow()
     local->setProperty ("rawDir", rawDir.getFullPathName());
     local->setProperty ("inboxDir", inboxDir.getFullPathName());
     local->setProperty ("organizedDir", organizedDir.getFullPathName());
+    local->setProperty ("datasetDir", datasetDir.getFullPathName());
     local->setProperty ("inboxWatch", inboxWatch);
     local->setProperty ("inboxBacklogDecidedFor", backlogDecidedFor);
     local->setProperty ("configDir", catalog.getDirectory().getFullPathName());
@@ -1176,6 +1179,135 @@ std::vector<ExportItem> MainComponent::collectExportItems (int& untyped, int& ng
         items.push_back (item);
     }
     return items;
+}
+
+void MainComponent::showExportMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, WT_U8 ("ライブラリへ書き出し   ") + keyMap.describe (Action::Export), audio != nullptr);
+    menu.addItem (2, WT_U8 ("データセットに追加   ") + keyMap.describe (Action::ExportDataset), audio != nullptr);
+    menu.addSeparator();
+    menu.addItem (3, WT_U8 ("データセットの場所を変更...") + (datasetDir.isDirectory() ? "   (" + datasetDir.getFullPathName() + ")" : juce::String()));
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&exportButton), [safe] (int r) {
+        if (safe == nullptr)
+            return;
+        if (r == 1)
+            safe->startExport();
+        else if (r == 2)
+            safe->startDatasetExport();
+        else if (r == 3)
+            safe->chooseDatasetFolder ({});
+    });
+}
+
+std::vector<DatasetClip> MainComponent::collectDatasetClips (int& untyped) const
+{
+    std::vector<DatasetClip> clips;
+    untyped = 0;
+
+    const auto category = cycles.getCategory();
+    juce::String categoryJa;
+    for (const auto& c : catalog.getCategories())
+        if (c.name.equalsIgnoreCase (category))
+            categoryJa = c.jp;
+    const auto knownTypes = catalog.getTypes (category);
+
+    for (int i = 0; i < cycles.size(); ++i)
+    {
+        const auto& c = cycles[i];
+        if (c.type < 0)
+        {
+            ++untyped;
+            continue;
+        }
+
+        DatasetClip clip;
+        clip.start = c.start;
+        clip.end = c.end;
+        clip.sourceFile = audio->file.getFileName();
+        clip.sourceSize = audio->file.getSize();
+        clip.name = cycles.nameOf (i);
+        clip.category = category;
+        clip.categoryJa = categoryJa;
+        clip.type = cycles.typeNameOf (c.type);
+        for (const auto& t : knownTypes)
+            if (t.name.equalsIgnoreCase (clip.type))
+                clip.typeJa = t.jp;
+        clip.rating = c.rating;
+        clip.ng = c.ng;
+        clip.attributes = normaliseAttributes (c.attributes);
+        clips.push_back (clip);
+    }
+    return clips;
+}
+
+void MainComponent::chooseDatasetFolder (std::function<void()> then)
+{
+    auto start = datasetDir;
+    if (! start.isDirectory())
+        start = juce::File ("G:\\SFX_Library\\Datasets").isDirectory() ? juce::File ("G:\\SFX_Library\\Datasets")
+                : juce::File ("G:\\SFX_Library").isDirectory()           ? juce::File ("G:\\SFX_Library")
+                                                                          : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    chooser = std::make_unique<juce::FileChooser> (WT_U8 ("データセットのフォルダを選択 (中に audio フォルダと metadata.jsonl を作ります。別のフォルダを選ぶと別のデータセットになります)"), start);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [this, then = std::move (then)] (const juce::FileChooser& fc) {
+                              const auto dir = fc.getResult();
+                              if (! dir.isDirectory())
+                                  return;
+                              datasetDir = dir;
+                              scheduleSave();
+                              if (then)
+                                  then();
+                          });
+}
+
+void MainComponent::startDatasetExport()
+{
+    if (audio == nullptr)
+        return;
+
+    if (! datasetDir.isDirectory())
+    {
+        chooseDatasetFolder ([this] { startDatasetExport(); });
+        return;
+    }
+
+    int untyped = 0;
+    const auto clips = collectDatasetClips (untyped);
+    if (clips.empty())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, WT_U8 ("データセット"),
+                                                WT_U8 ("追加できるサイクルがありません。タイプを割り当ててください。"));
+        return;
+    }
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    const auto data = audio;
+    const auto folder = datasetDir;
+    const auto options = conditioning.options;
+    const auto summary = conditioningSummary();
+    loader.addJob ([safe, data, clips, folder, options, summary, untyped] {
+        const auto result = addToDataset (*data, clips, folder, options, JUCE_APPLICATION_VERSION_STRING);
+        juce::MessageManager::callAsync ([safe, result, folder, options, summary, untyped] {
+            juce::String msg = WT_U8 ("データセットに追加しました\n") + folder.getFullPathName() + "\n\n"
+                               + WT_U8 ("新規 ") + juce::String (result.added) + WT_U8 (" 件 / 更新 ") + juce::String (result.updated)
+                               + WT_U8 (" 件 / NG にした ") + juce::String (result.ngMarked) + WT_U8 (" 件 / 変更なし ") + juce::String (result.unchanged) + WT_U8 (" 件");
+            if (options.active())
+                msg += WT_U8 ("\n整音: ") + summary;
+            if (untyped > 0)
+                msg += "\n\n" + juce::String (untyped) + WT_U8 (" 件は未分類のため追加していません");
+            if (result.skippedNg > 0)
+                msg += "\n" + juce::String (result.skippedNg) + WT_U8 (" 件は NG のため追加していません");
+            if (! result.errors.isEmpty())
+                msg += "\n\n" + juce::String (result.errors.size()) + WT_U8 (" 件でエラー:\n") + result.errors.joinIntoString ("\n");
+            juce::AlertWindow::showMessageBoxAsync (result.errors.isEmpty() ? juce::MessageBoxIconType::InfoIcon : juce::MessageBoxIconType::WarningIcon,
+                                                    WT_U8 ("データセット"), msg);
+            juce::ignoreUnused (safe);
+        });
+    });
 }
 
 void MainComponent::startExport()
@@ -2108,6 +2240,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     switch (action)
     {
         case Action::Export:        startExport(); break;
+        case Action::ExportDataset: startDatasetExport(); break;
         case Action::SelectAll:     view.setSelection (0, audio->getNumSamples()); break;
         case Action::Undo:          cycles.undo(); break;
         case Action::Redo:          cycles.redo(); break;

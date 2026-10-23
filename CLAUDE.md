@@ -71,3 +71,13 @@
 - 属性 (`Core/Attributes`, `UI/AttributeEditor`): 空白区切りの `key=value` (空白を含む値は `"..."`、キーの無い語も可)。入力補助は 既定の key (strength / speed / material / tool / mic / distance) と代表値 + 学習ログとこの録音で使った語 (使用回数順)。何も強制しない。同じ key を追加すると置き換え、値を空にすると削除
 - **NG のサイクルは書き出さない** (件数を完了ダイアログに出す。WAV のマーカー/プロジェクトには NG のまま残る)。書き出す WAV の INFO コメントに `rating=4; attrs=strength=strong ...` を追記 (ある時だけ)。波形上の NG は薄く `NG` 付きで表示
 - 検証: `--selftest-rating` (36 項目)。画面確認: `--snapshot-attributes <out.png>` (属性エディタ)、`WT_DEMO_RATING=1 ... --snapshot <in.wav> <out.png>` (一覧にデモの ★/NG/属性)
+
+## データセット書き出し (Phase 7, `Core/Dataset`)
+- ツールバーの `Export ▾` メニュー: ライブラリへ書き出し (Ctrl+E) / **データセットに追加 (Ctrl+Shift+E)** / データセットの場所を変更。場所は PC ごと (`settings.json` の `datasetDir`、初回に選択。別のフォルダを選べば別のデータセット)
+- 形: `<folder>/audio/<出力名>.wav` (24bit、整音設定を適用) + `metadata.jsonl` (1 行 1 クリップ) + `dataset.json` (形式の説明)。行 (schema 1): `id`, `audio`, `original{file,start,end}`, `name`, `category`, `type`, `caption_en`, `caption_ja`, `tags_en`, `tags_ja`, `attributes{key:値}`, `free_tags[]`, `rating`, `ng`, `duration`, `sampleRate`, `channels`, `bits`, `conditioning`, `exportedAt`, `app` (更新時は `updatedAt`)
+- `id` = 録音のファイル名 (大小無視) + サイズ + 範囲から作る 128bit (FNV-1a ×2)。**同じ id が既にあれば音声は書き直さず、メタデータ (★・属性・タイプ・キャプション・NG) だけ更新**。名前が別クリップと衝突したら末尾に `_<id の先頭 8 文字>`。何も上書き・削除しない (`metadata.jsonl` は一時ファイル経由で置き換え、読めない行・他者の行はそのまま保持)
+- **NG**: 新しいクリップは追加しない。すでに入っているものが後から NG になったら行に `"ng": true` を付けるだけ (音声は残す。学習側が `ng` で絞る)。NG を外せば戻る
+- キャプションは翻訳辞書ができるまで規則で作る (`Open (TOOLS), strength strong, ...`)。日本語はカタログの日本語列 (Category / Type) を使い、属性の語は原文のまま
+- 今は**開いている録音**からの追加だけ。Raw フォルダ全体から (WAV の `wtag` を読んで同じ処理) は未実装
+- 検証: `--selftest-dataset` (26 項目)
+- **修正**: Type の日本語シード (`Catalog.cpp` の `seedTypes`) が `const char*` のまま `String` になり Latin-1 として読まれて文字化けしていた (新しく作った `types.csv` / `catalog.xlsx` の Japanese 列)。`String::fromUTF8` に修正済み。**修正前に作られた設定フォルダの Types シートは文字化けしたまま**なので、Excel で開いて確認すること (カテゴリは元から正常)

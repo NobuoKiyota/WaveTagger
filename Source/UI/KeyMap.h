@@ -11,7 +11,7 @@ enum class Action
     PlayStop, Confirm, Cancel, Delete,
     ToStart, ToEnd, ZoomFit, ZoomSelection, ToggleLoop, ZoomIn, ZoomOut, ScrollLeft, ScrollRight,
     AutoSplit, ImportMarkers, SaveWav, AcceptSuggestion, ToggleConditioned,
-    Rate0, Rate1, Rate2, Rate3, Rate4, Rate5, ToggleNg, EditAttributes,
+    Rate0, Rate1, Rate2, Rate3, Rate4, Rate5, ToggleNg, EditAttributes, ExportDataset,
     Type1, Type2, Type3, Type4, Type5, Type6, Type7, Type8, Type9,
     Count
 };

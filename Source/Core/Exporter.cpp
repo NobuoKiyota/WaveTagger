@@ -102,6 +102,7 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
 
         writer.reset();
         ++result.written;
+        result.writtenFiles.push_back ({ file, chain });
     }
 
     return result;

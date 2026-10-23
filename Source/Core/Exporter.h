@@ -18,6 +18,9 @@ struct ExportResult
     int written = 0;
     juce::StringArray skippedExisting, errors;
 
+    /** Every file that was written, with the conditioning that went into it (describeConditioning; empty if none). */
+    std::vector<std::pair<juce::File, juce::String>> writtenFiles;
+
     // Normalisation: the gains that were applied and how many were stopped by the ceiling / max gain
     double minGainDb = 0.0, maxGainDb = 0.0;
     int gainLimited = 0;

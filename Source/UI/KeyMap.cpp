@@ -27,7 +27,7 @@ const Info infos[numActions] = {
     { "acceptSuggestion", "候補の Type を採用" },
     { "toggleConditioned", "整音後 ⇄ 原音 (A/B 試聴)" },
     { "rate0", "★ を外す" }, { "rate1", "★ 1" }, { "rate2", "★ 2" }, { "rate3", "★ 3" }, { "rate4", "★ 4" }, { "rate5", "★ 5" },
-    { "toggleNg", "NG の切り替え" }, { "editAttributes", "属性を編集" },
+    { "toggleNg", "NG の切り替え" }, { "editAttributes", "属性を編集" }, { "exportDataset", "データセットに追加" },
     { "type1", "Type 1" }, { "type2", "Type 2" }, { "type3", "Type 3" }, { "type4", "Type 4" }, { "type5", "Type 5" },
     { "type6", "Type 6" }, { "type7", "Type 7" }, { "type8", "Type 8" }, { "type9", "Type 9" },
 };
@@ -62,6 +62,7 @@ void KeyMap::reset()
         set ((Action) ((int) Action::Rate0 + i), { ctrl ('0' + i) });
     set (Action::ToggleNg, { plain ('N') });
     set (Action::EditAttributes, { plain ('E') });
+    set (Action::ExportDataset, { juce::KeyPress ('E', juce::ModifierKeys::ctrlModifier | juce::ModifierKeys::shiftModifier, 0) });
     set (Action::SelectAll, { ctrl ('A') });
     set (Action::Undo, { ctrl ('Z') });
     set (Action::Redo, { ctrl ('Y'), juce::KeyPress ('Z', juce::ModifierKeys::ctrlModifier | juce::ModifierKeys::shiftModifier, 0) });

@@ -7,6 +7,7 @@
 #include "Core/Clustering.h"
 #include "Core/Attributes.h"
 #include "Core/Conditioning.h"
+#include "Core/Dataset.h"
 #include "Core/Exporter.h"
 #include "Core/FeatureStore.h"
 #include "Core/HardLinks.h"
@@ -75,7 +76,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -87,6 +88,7 @@ public:
                                         : args[0] == "--selftest-learn" ? selfTestLearn()
                                         : args[0] == "--selftest-condition" ? selfTestCondition()
                                         : args[0] == "--selftest-rating" ? selfTestRating()
+                                        : args[0] == "--selftest-dataset" ? selfTestDataset()
                                         : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
@@ -2641,6 +2643,236 @@ private:
             const auto all = main.testExportItems (untyped, ng);
             check (all.size() == 3 && ng == 0 && ! all[0].comment.contains ("rating=") && ! all[0].comment.contains ("attrs="),
                    "nothing is added to the comment when there are no stars or attributes");
+        }
+
+        return ok;
+    }
+
+    bool selfTestDataset()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        const auto base = testRoot.getChildFile ("dataset_test");
+        base.deleteRecursively();
+
+        // ---- ids and captions
+        {
+            const auto id = datasetClipId ("Take1.wav", 1000, 10, 20);
+            check (id.length() == 32 && id == datasetClipId ("take1.WAV", 1000, 10, 20), "a clip id is 32 hex characters and ignores the case of the file name");
+            check (id != datasetClipId ("take1.wav", 1001, 10, 20) && id != datasetClipId ("take1.wav", 1000, 11, 20) && id != datasetClipId ("take2.wav", 1000, 10, 20),
+                   "and changes with the size, the range and the recording");
+
+            DatasetClip c;
+            c.category = "TOOLS";
+            c.categoryJa = WT_U8 ("工具");
+            c.type = "Open";
+            c.typeJa = WT_U8 ("開く");
+            c.attributes = "strength=strong material=\"cardboard box\" outdoor";
+            check (datasetCaptionEn (c) == "Open (TOOLS), strength strong, material cardboard box, outdoor", "the English caption is built from type, category and attributes");
+            check (datasetCaptionJa (c) == WT_U8 ("開く (工具)、strength strong、material cardboard box、outdoor"), "the Japanese one uses the catalogue's aliases");
+            c.typeJa = {};
+            c.categoryJa = {};
+            c.attributes = {};
+            check (datasetCaptionJa (c) == "Open (TOOLS)" && datasetCaptionEn (c) == "Open (TOOLS)", "without aliases or attributes both fall back to the plain names");
+        }
+
+        // a 6 s stereo recording with three noise bursts
+        AudioData audio;
+        audio.sampleRate = 48000.0;
+        audio.bitsPerSample = 24;
+        audio.buffer.setSize (2, 48000 * 6);
+        {
+            juce::Random rnd (91);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < audio.buffer.getNumSamples(); ++i)
+                {
+                    const auto burst = (i >= 24000 && i < 48000) || (i >= 120000 && i < 144000) || (i >= 216000 && i < 240000);
+                    audio.buffer.setSample (ch, i, (rnd.nextFloat() - 0.5f) * (burst ? 0.4f : 0.002f));
+                }
+        }
+
+        const auto clip = [] (const juce::String& file, juce::int64 start, juce::int64 end, const juce::String& name, const juce::String& type) {
+            DatasetClip c;
+            c.start = start;
+            c.end = end;
+            c.sourceFile = file;
+            c.sourceSize = 123456;
+            c.name = name;
+            c.category = "TOOLS";
+            c.categoryJa = WT_U8 ("工具");
+            c.type = type;
+            c.typeJa = type == "Open" ? WT_U8 ("開く") : WT_U8 ("閉じる");
+            return c;
+        };
+
+        auto openClip = clip ("take.wav", 24000, 48000, "Tools_Open01", "Open");
+        openClip.rating = 4;
+        openClip.attributes = "strength=strong material=cardboard";
+        auto badClip = clip ("take.wav", 120000, 144000, "Tools_Open02", "Open");
+        badClip.ng = true;
+        auto closeClip = clip ("take.wav", 216000, 240000, "Tools_Close01", "Close");
+
+        const auto folder = base.getChildFile ("set");
+        const ConditionOptions none;
+
+        const auto readLines = [&] {
+            juce::StringArray lines;
+            lines.addLines (folder.getChildFile ("metadata.jsonl").loadFileAsString());
+            lines.removeEmptyStrings();
+            return lines;
+        };
+        const auto bytesOf = [] (const juce::File& f) {
+            juce::MemoryBlock m;
+            f.loadFileAsData (m);
+            return m;
+        };
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+
+        // ---- the first time
+        auto r = addToDataset (audio, { openClip, badClip, closeClip }, folder, none, "test");
+        check (r.added == 2 && r.skippedNg == 1 && r.errors.isEmpty(), "two clips are added, the new NG one is left out");
+
+        const auto lines = readLines();
+        check (lines.size() == 2, "metadata.jsonl has one line per clip");
+        const auto first = juce::JSON::parse (lines[0]);
+        check (first.getProperty ("id", {}).toString() == datasetClipId ("take.wav", 123456, 24000, 48000) && first.getProperty ("audio", {}).toString() == "audio/Tools_Open01.wav"
+                   && first.getProperty ("category", {}).toString() == "TOOLS" && first.getProperty ("type", {}).toString() == "Open"
+                   && (int) first.getProperty ("rating", 0) == 4 && ! (bool) first.getProperty ("ng", true),
+               "a line carries id, audio path, category, type, rating and NG");
+        check (first.getProperty ("caption_ja", {}).toString() == WT_U8 ("開く (工具)、strength strong、material cardboard")
+                   && first.getProperty ("caption_en", {}).toString() == "Open (TOOLS), strength strong, material cardboard",
+               "both captions are there (and the Japanese text comes back as it went in)");
+        check (first.getProperty ("attributes", {}).getProperty ("strength", {}).toString() == "strong" && first.getProperty ("tags_en", {}).getArray() != nullptr
+                   && first.getProperty ("tags_en", {}).getArray()->contains ("strong") && first.getProperty ("tags_ja", {}).getArray()->contains (WT_U8 ("工具")),
+               "attributes are a key / value object and the tags are lists (English and Japanese)");
+        check (std::abs ((double) first.getProperty ("duration", 0.0) - 0.5) < 1.0e-9 && (int) first.getProperty ("channels", 0) == 2
+                   && (int) first.getProperty ("bits", 0) == 24 && first.getProperty ("original", {}).getProperty ("file", {}).toString() == "take.wav"
+                   && (juce::int64) first.getProperty ("original", {}).getProperty ("start", 0) == 24000,
+               "duration, format and the place in the original recording are recorded");
+
+        const auto wavFile = folder.getChildFile ("audio/Tools_Open01.wav");
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (wavFile));
+        check (reader != nullptr && reader->lengthInSamples == 24000 && reader->bitsPerSample == 24 && reader->numChannels == 2 && reader->sampleRate == 48000.0,
+               "the clip's audio is written as a 24-bit WAV of the right length");
+        reader.reset();
+        check (folder.getChildFile ("dataset.json").existsAsFile() && ! folder.getChildFile ("audio/Tools_Open02.wav").exists(), "dataset.json describes the format; the NG clip has no audio");
+
+        int stray = 0;
+        for (const auto& f : folder.findChildFiles (juce::File::findFilesAndDirectories, false))
+            stray += (f.getFileName() == "metadata.jsonl" || f.getFileName() == "dataset.json" || f.getFileName() == "audio") ? 0 : 1;
+        check (stray == 0, "no temporary files are left behind");
+
+        // ---- again: nothing changes
+        const auto audioBefore = bytesOf (wavFile);
+        const auto metaBefore = bytesOf (folder.getChildFile ("metadata.jsonl"));
+        r = addToDataset (audio, { openClip, badClip, closeClip }, folder, none, "test");
+        check (r.added == 0 && r.updated == 0 && r.ngMarked == 0 && r.unchanged == 2 && r.skippedNg == 1, "adding the same clips again changes nothing");
+        check (bytesOf (wavFile) == audioBefore && bytesOf (folder.getChildFile ("metadata.jsonl")) == metaBefore, "audio and metadata are byte for byte the same");
+
+        // ---- a change of mind about stars and attributes
+        openClip.rating = 5;
+        openClip.attributes = "strength=weak material=cardboard distance=close";
+        r = addToDataset (audio, { openClip, closeClip }, folder, none, "test");
+        const auto updated = juce::JSON::parse (readLines()[0]);
+        check (r.updated == 1 && r.added == 0 && (int) updated.getProperty ("rating", 0) == 5 && updated.getProperty ("attributes", {}).getProperty ("distance", {}).toString() == "close"
+                   && updated.getProperty ("exportedAt", {}).toString() == first.getProperty ("exportedAt", {}).toString() && updated.hasProperty ("updatedAt"),
+               "new stars and attributes update the line (and say when), the audio is not written again");
+        check (bytesOf (wavFile) == audioBefore, "the audio file was not touched");
+
+        // ---- NG afterwards: flagged, nothing deleted
+        openClip.ng = true;
+        r = addToDataset (audio, { openClip, closeClip }, folder, none, "test");
+        check (r.ngMarked == 1 && (bool) juce::JSON::parse (readLines()[0]).getProperty ("ng", false) && wavFile.existsAsFile(), "a clip that becomes NG is flagged in the metadata and its audio stays");
+        openClip.ng = false;
+        r = addToDataset (audio, { openClip, closeClip }, folder, none, "test");
+        check (r.updated == 1 && ! (bool) juce::JSON::parse (readLines()[0]).getProperty ("ng", true), "and the flag goes away again when NG is taken off");
+
+        // ---- another recording with the same output name
+        auto other = clip ("other.wav", 24000, 48000, "Tools_Open01", "Open");
+        r = addToDataset (audio, { other }, folder, none, "test");
+        const auto otherId = datasetClipId ("other.wav", 123456, 24000, 48000);
+        check (r.added == 1 && folder.getChildFile ("audio/Tools_Open01_" + otherId.substring (0, 8) + ".wav").existsAsFile() && bytesOf (wavFile) == audioBefore,
+               "a name that is taken gets the id appended; the existing audio is not overwritten");
+
+        // ---- lines that are not ours stay
+        {
+            const auto metaFile = folder.getChildFile ("metadata.jsonl");
+            auto text = metaFile.loadFileAsString();
+            text += "this is not json\n{\"other\": 1}\n";
+            metaFile.replaceWithText (text, false, false, "\n");
+
+            r = addToDataset (audio, { clip ("third.wav", 120000, 144000, "Tools_Open03", "Open") }, folder, none, "test");
+            const auto after = readLines();
+            check (r.added == 1 && after.contains ("this is not json") && after.contains ("{\"other\": 1}") && after.size() == 6,
+                   "lines that are not clips are kept exactly as they were");
+        }
+
+        // ---- conditioning goes into the audio and is recorded
+        {
+            ConditionOptions o;
+            o.normalize = NormalizeMode::peak;
+            o.targetDb = -3.0;
+            const auto cf = base.getChildFile ("conditioned");
+            r = addToDataset (audio, { openClip }, cf, o, "test");
+            std::unique_ptr<juce::AudioFormatReader> cr (formats.createReaderFor (cf.getChildFile ("audio/Tools_Open01.wav")));
+            float lo = 0.0f, hi = 0.0f;
+            juce::AudioBuffer<float> b (2, (int) cr->lengthInSamples);
+            cr->read (&b, 0, (int) cr->lengthInSamples, 0, true, true);
+            const auto peak = samplePeak (b);
+            juce::ignoreUnused (lo, hi);
+            check (r.added == 1 && std::abs (20.0 * std::log10 (peak) - (-3.0)) < 0.01
+                       && juce::JSON::parse (cf.getChildFile ("metadata.jsonl").loadFileAsString().upToFirstOccurrenceOf ("\n", false, false)).getProperty ("conditioning", {}).toString().contains ("norm=-3.0dBFS"),
+                   "the conditioning is applied to the clip and written into its metadata");
+        }
+
+        // ---- clips that cannot be added are reported
+        {
+            auto beyond = clip ("take.wav", 0, 48000 * 99, "Tools_Beyond01", "Open");
+            auto untyped = clip ("take.wav", 0, 100, "Tools_X01", "");
+            r = addToDataset (audio, { beyond, untyped }, folder, none, "test");
+            check (r.added == 0 && r.errors.size() == 2, "a clip outside the recording or without a type is an error, not a line");
+        }
+
+        // ---- the main window prepares the clips (with the catalogue's Japanese)
+        {
+            auto source = std::make_shared<AudioData>();
+            source->sampleRate = 48000.0;
+            source->bitsPerSample = 24;
+            source->buffer.setSize (1, 48000 * 4);
+            source->buffer.clear();
+            source->file = base.getChildFile ("window_take.wav");
+            source->file.replaceWithText ("x");
+
+            MainComponent main;
+            main.testLoadAudio (source);
+            auto& cycles = main.testCyclesMutable();
+            cycles.setTypeName (0, "Hit");
+            cycles.setCategory ("TOOLS");
+            cycles.add (1000, 20000, 0);
+            cycles.add (30000, 50000, 0);
+            cycles.add (60000, 80000, -1);
+            cycles.setRating ({ 0 }, 3);
+            cycles.setNg ({ 1 }, true);
+            cycles.setAttributes (0, "strength=strong");
+
+            int untyped = 0;
+            const auto clips = main.testDatasetClips (untyped);
+            check (clips.size() == 2 && untyped == 1 && clips[0].rating == 3 && clips[1].ng && clips[0].attributes == "strength=strong",
+                   "typed cycles become clips (NG ones too: the dataset flags them), untyped ones are counted");
+            check (clips.size() == 2 && clips[0].categoryJa == WT_U8 ("工具") && clips[0].typeJa == WT_U8 ("叩く") && clips[0].sourceFile == "window_take.wav" && clips[0].sourceSize == 1,
+                   "the Japanese names come from the catalogue");
         }
 
         return ok;

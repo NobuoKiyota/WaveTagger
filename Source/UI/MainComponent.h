@@ -9,6 +9,7 @@
 #include "Core/Suggester.h"
 #include "Core/CategoryProfiles.h"
 #include "Core/ConditioningPreview.h"
+#include "Core/Dataset.h"
 #include "Core/Exporter.h"
 #include "Core/CycleModel.h"
 #include "Core/EmbeddedState.h"
@@ -71,6 +72,7 @@ public:
     juce::String testSummary() const { return conditioningSummary(); }
     void testRefreshListening() { refreshListening(); }
     void testSelectRows (const juce::Array<int>& rows) { list.selectRows (rows); }
+    std::vector<DatasetClip> testDatasetClips (int& untyped) const { return collectDatasetClips (untyped); }
     void testSetCursor (juce::int64 sample) { view.setCursor (sample); }
     std::vector<ExportItem> testExportItems (int& untyped, int& ng) const { return collectExportItems (untyped, ng); }
 
@@ -105,6 +107,11 @@ private:
     void startExport();
     /** What an export would write: typed, not NG. `untyped` / `ng` count the ones left out. */
     std::vector<ExportItem> collectExportItems (int& untyped, int& ng) const;
+    /** The typed cycles as dataset clips (NG ones included: the dataset flags them). `untyped` counts the ones left out. */
+    std::vector<DatasetClip> collectDatasetClips (int& untyped) const;
+    void startDatasetExport();
+    void chooseDatasetFolder (std::function<void()> then);
+    void showExportMenu();
     juce::Array<int> targetRows() const;
     void rateRows (int stars);
     void toggleNgRows();
@@ -213,7 +220,7 @@ private:
     std::unique_ptr<juce::VBlankAttachment> vblank;
     juce::String statusText;
     bool wasPlaying = false;
-    juce::File snapshotOutput, exportDir, rawDir, inboxDir, organizedDir;
+    juce::File snapshotOutput, exportDir, rawDir, inboxDir, organizedDir, datasetDir;
     bool inboxWatch = false;
     juce::String backlogDecidedFor;
     bool embedding = false;
