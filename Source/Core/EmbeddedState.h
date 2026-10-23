@@ -12,6 +12,12 @@ struct WtagCycle
     int type = -1;         // palette slot when it was written (only a hint)
     juce::String typeName; // what really identifies the type; empty = untyped
     juce::String name;     // output name at that moment, e.g. pen_push03
+    juce::String autoType; // suggestion that was made for it, and how sure the engine was
+    float autoConf = -1.0f;
+    bool confirmed = true;
+    int rating = 0;
+    bool ng = false;
+    juce::String attributes;
 };
 
 struct WtagData

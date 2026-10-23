@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AutoSplit.h"
+#include "Suggester.h"
 #include "WavChunks.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <set>
@@ -13,6 +14,8 @@ struct InboxOptions
     juce::StringArray categoryNames;       // exact Category names; a folder named like one (any case) becomes the Category hint
     AutoSplitParams split;
     juce::String appVersion { "inbox" };
+    std::shared_ptr<const Suggester> suggester; // what has been learned so far (null = no suggestions)
+    float autoThreshold = 0.7f;             // from this confidence on, the Type is applied (and marked 'not looked at yet')
 };
 
 struct InboxOutcome
@@ -25,6 +28,9 @@ struct InboxOutcome
     juce::String archiveNote;
     int cycles = 0;
     juce::String categoryHint, typeHint;
+    int autoTyped = 0;        // cycles typed by the suggestion engine
+    int uncertain = 0;        // cycles left without a Type: a person has to decide
+    float minConfidence = -1.0f; // the least certain suggestion made (-1: none was made)
 };
 
 /**
@@ -69,6 +75,7 @@ public:
         juce::File inbox, raw;
         bool enabled = false;
         juce::StringArray categoryNames;
+        std::shared_ptr<const Suggester> suggester;
         juce::File stateFile; // remembers which files must not be imported (the existing backlog, failed attempts) across restarts
     };
 

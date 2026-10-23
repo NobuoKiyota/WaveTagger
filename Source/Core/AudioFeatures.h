@@ -15,4 +15,11 @@ using FeatureVector = std::array<float, featureDims>;
 */
 bool computeFeatures (juce::AudioFormatManager& formats, const juce::File& file, FeatureVector& out,
                       double maxSeconds = 4.0, juce::String* error = nullptr);
+
+/** The same description for audio that is already in memory: samples [start, end) of a (multi-channel) buffer. */
+bool computeSegmentFeatures (const juce::AudioBuffer<float>& buffer, double sampleRate, juce::int64 start, juce::int64 end,
+                             FeatureVector& out, double maxSeconds = 4.0);
+
+/** Core of both: mono samples, their sample rate and the length of the whole sound in seconds. */
+bool computeFeaturesFromMono (const std::vector<float>& mono, double sampleRate, double totalSeconds, FeatureVector& out);
 } // namespace wt

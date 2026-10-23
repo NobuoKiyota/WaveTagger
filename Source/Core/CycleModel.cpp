@@ -127,7 +127,10 @@ void CycleModel::setType (const juce::Array<int>& indices, int type)
     pushUndo();
     for (auto i : indices)
         if (i >= 0 && i < size())
+        {
             cycles[(size_t) i].type = type;
+            cycles[(size_t) i].confirmed = true; // a person decided
+        }
     changed();
 }
 
@@ -145,6 +148,77 @@ void CycleModel::setRange (int index, juce::int64 start, juce::int64 end)
     changed();
 }
 
+void CycleModel::setRating (const juce::Array<int>& indices, int stars)
+{
+    pushUndo();
+    for (auto i : indices)
+        if (i >= 0 && i < size())
+            cycles[(size_t) i].rating = juce::jlimit (0, 5, stars);
+    changed();
+}
+
+void CycleModel::setNg (const juce::Array<int>& indices, bool ng)
+{
+    pushUndo();
+    for (auto i : indices)
+        if (i >= 0 && i < size())
+            cycles[(size_t) i].ng = ng;
+    changed();
+}
+
+void CycleModel::setAttributes (int index, const juce::String& text)
+{
+    if (index < 0 || index >= size() || cycles[(size_t) index].attributes == text)
+        return;
+    pushUndo();
+    cycles[(size_t) index].attributes = text;
+    changed();
+}
+
+void CycleModel::setSuggestions (const std::vector<int>& indices, const juce::StringArray& typeNames, const std::vector<float>& confidences)
+{
+    bool any = false;
+    for (size_t k = 0; k < indices.size(); ++k)
+    {
+        const auto i = indices[k];
+        if (i < 0 || i >= size())
+            continue;
+        cycles[(size_t) i].autoType = typeNames[(int) k];
+        cycles[(size_t) i].autoConf = confidences[k];
+        any = true;
+    }
+    if (any)
+        changed();
+}
+
+void CycleModel::setSuggestion (int index, const juce::String& typeName, float confidence, int typeSlot, bool apply)
+{
+    if (index < 0 || index >= size())
+        return;
+
+    auto& c = cycles[(size_t) index];
+    c.autoType = typeName;
+    c.autoConf = confidence;
+    if (apply)
+    {
+        c.type = typeSlot;
+        c.confirmed = false;
+    }
+    changed();
+}
+
+void CycleModel::markAllConfirmed()
+{
+    bool any = false;
+    for (auto& c : cycles)
+    {
+        any = any || ! c.confirmed;
+        c.confirmed = true;
+    }
+    if (any)
+        changed();
+}
+
 int CycleModel::update (int index, juce::int64 start, juce::int64 end, int type)
 {
     if (index < 0 || index >= size())
@@ -153,7 +227,11 @@ int CycleModel::update (int index, juce::int64 start, juce::int64 end, int type)
         std::swap (start, end);
 
     pushUndo();
-    cycles[(size_t) index] = { start, end, type };
+    auto& c = cycles[(size_t) index];
+    c.start = start;
+    c.end = end;
+    c.type = type;
+    c.confirmed = true;
     sortCycles();
 
     int found = 0;
@@ -316,6 +394,12 @@ juce::var CycleModel::cyclesToVar() const
         o->setProperty ("start", (juce::int64) c.start);
         o->setProperty ("end", (juce::int64) c.end);
         o->setProperty ("type", c.type);
+        o->setProperty ("autoType", c.autoType);
+        o->setProperty ("autoConf", (double) c.autoConf);
+        o->setProperty ("confirmed", c.confirmed);
+        o->setProperty ("rating", c.rating);
+        o->setProperty ("ng", c.ng);
+        o->setProperty ("attrs", c.attributes);
         arr.add (juce::var (o));
     }
     return arr;
@@ -326,8 +410,19 @@ void CycleModel::cyclesFromVar (const juce::var& v)
     std::vector<Cycle> loaded;
     if (const auto* arr = v.getArray())
         for (const auto& item : *arr)
-            loaded.push_back ({ (juce::int64) item.getProperty ("start", 0), (juce::int64) item.getProperty ("end", 0),
-                                (int) item.getProperty ("type", -1) });
+        {
+            Cycle c;
+            c.start = (juce::int64) item.getProperty ("start", 0);
+            c.end = (juce::int64) item.getProperty ("end", 0);
+            c.type = (int) item.getProperty ("type", -1);
+            c.autoType = item.getProperty ("autoType", "").toString();
+            c.autoConf = (float) (double) item.getProperty ("autoConf", -1.0);
+            c.confirmed = (bool) item.getProperty ("confirmed", true);
+            c.rating = (int) item.getProperty ("rating", 0);
+            c.ng = (bool) item.getProperty ("ng", false);
+            c.attributes = item.getProperty ("attrs", "").toString();
+            loaded.push_back (c);
+        }
     replaceAll (std::move (loaded), false);
 }
 

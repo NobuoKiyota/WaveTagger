@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "Core/AudioFeatures.h"
 #include "Core/Exporter.h"
 #include "Core/WavChunks.h"
 #include "Core/Categories.h"
@@ -184,6 +185,7 @@ MainComponent::MainComponent()
 
     inboxQueue.load();
     featureStore.load();
+    setupLearning();
     inboxWatcher.onOutcome = [this] (const InboxOutcome& o) { handleInboxOutcome (o); };
     configureInbox();
     updateInboxBadge();
@@ -386,6 +388,8 @@ void MainComponent::audioLoaded (AudioDataPtr data, const juce::String& error)
     view.reset (audio->getNumSamples(), audio->sampleRate);
     list.setSampleRate (audio->sampleRate);
     editingCycle = -1;
+    featureCache.clear();
+    suggestedRanges.clear();
     updateHint();
     list.selectRows ({});
     waveView.setSelectedCycles ({});
@@ -515,6 +519,8 @@ void MainComponent::onVBlank()
 {
     if (++frameCounter % 120 == 0)
         catalog.reloadIfChanged();
+
+    suggestTick();
 
     const auto playing = playback.isPlaying();
 
@@ -710,6 +716,7 @@ juce::String MainComponent::changeConfigFolder (const juce::File& newDir)
         applySharedPreferences (prefs);
 
     lastInfoKey = {};
+    setupLearning();
     refreshLibraryInfo();
     scheduleSave();
     return juce::String (copied) + WT_U8 (" 個のファイルを新しい場所へコピーし、このフォルダに切り替えました。\n元のフォルダのファイルは、そのまま残してあります。");
@@ -911,7 +918,10 @@ void MainComponent::startExport()
                                   const auto result = exportCycles (*data, items, root);
                                   juce::MessageManager::callAsync ([safe, result, untyped, root, dest] {
                                       if (safe != nullptr && result.written > 0)
+                                      {
                                           safe->afterExport (dest);
+                                          safe->recordLabels ("export");
+                                      }
                                       juce::String msg = juce::String (result.written) + WT_U8 (" 件を書き出しました\n") + root.getFullPathName();
                                       if (untyped > 0)
                                           msg += "\n\n" + juce::String (untyped) + WT_U8 (" 件は未分類のためスキップしました");
@@ -1104,6 +1114,7 @@ void MainComponent::configureInbox()
     for (const auto& c : catalog.getCategories())
         config.categoryNames.add (c.name);
     config.stateFile = getAppDataDir().getChildFile ("inbox_ignored.json");
+    config.suggester = std::make_shared<Suggester> (suggester); // a snapshot of what has been learned so far
     inboxWatcher.configure (config);
 }
 
@@ -1194,6 +1205,178 @@ void MainComponent::setInboxWatching (bool on)
 }
 
 //==============================================================================
+// Learning: labels people give are remembered; the engine suggests from them
+//==============================================================================
+void MainComponent::setupLearning()
+{
+    labelStore.setLocation (catalog.getDirectory().getChildFile ("learning"), juce::SystemStats::getComputerName());
+    labelStore.load();
+    suggester.rebuild (labelStore);
+    suggesterRevision = labelStore.getRevision();
+    suggestedRanges.clear();
+}
+
+bool MainComponent::featuresFor (juce::int64 start, juce::int64 end, FeatureVector& out)
+{
+    if (audio == nullptr)
+        return false;
+
+    const auto key = std::make_pair (start, end);
+    const auto it = featureCache.find (key);
+    if (it != featureCache.end())
+    {
+        out = it->second;
+        return true;
+    }
+
+    if (! computeSegmentFeatures (audio->buffer, audio->sampleRate, start, end, out))
+        return false;
+    featureCache[key] = out;
+    return true;
+}
+
+/** A few cycles per frame: suggestions appear without ever blocking the window. */
+void MainComponent::suggestTick()
+{
+    if (audio == nullptr || snapshotOutput != juce::File())
+        return;
+
+    if (suggesterRevision != labelStore.getRevision())
+    {
+        suggester.rebuild (labelStore);
+        suggesterRevision = labelStore.getRevision();
+        suggestedRanges.clear(); // new knowledge: look at every untyped cycle again
+        configureInbox();        // the Inbox imports with the latest knowledge
+    }
+    if (! suggester.isReady())
+        return;
+
+    std::vector<int> indices;
+    juce::StringArray types;
+    std::vector<float> confidences;
+    for (int i = 0; i < cycles.size() && indices.size() < 4; ++i)
+    {
+        const auto& c = cycles[i];
+        const auto range = std::make_pair (c.start, c.end);
+        if (c.type >= 0 || suggestedRanges.count (range) != 0)
+            continue;
+
+        suggestedRanges.insert (range);
+        FeatureVector v {};
+        if (! featuresFor (c.start, c.end, v))
+            continue;
+
+        const auto sug = suggester.suggest (v, cycles.getCategory());
+        indices.push_back (i);
+        types.add (sug.valid() ? sug.type : juce::String());
+        confidences.push_back (sug.valid() ? sug.confidence : -1.0f);
+    }
+
+    if (! indices.empty())
+        cycles.setSuggestions (indices, types, confidences);
+}
+
+/** The slot holding this Type name; a name the palette lacks takes the first free slot (so a suggestion is never lost). */
+int MainComponent::slotForTypeName (const juce::String& name, bool createIfMissing)
+{
+    for (int i = 0; i < CycleModel::numSlots; ++i)
+        if (cycles.getType (i).name.equalsIgnoreCase (name))
+            return i;
+
+    if (createIfMissing)
+        for (int i = 0; i < CycleModel::numSlots; ++i)
+            if (cycles.getType (i).name.isEmpty())
+            {
+                cycles.setTypeName (i, name);
+                return i;
+            }
+    return -1;
+}
+
+void MainComponent::acceptSuggestions (const juce::Array<int>& rows)
+{
+    for (auto i : rows)
+    {
+        if (i < 0 || i >= cycles.size() || cycles[i].autoType.isEmpty())
+            continue;
+
+        const auto slot = slotForTypeName (cycles[i].autoType, true);
+        if (slot >= 0)
+            cycles.setType ({ i }, slot);
+    }
+}
+
+int MainComponent::applyAllSuggestions (float minConfidence)
+{
+    int applied = 0;
+    juce::Array<int> rows;
+    for (int i = 0; i < cycles.size(); ++i)
+        if (cycles[i].type < 0 && cycles[i].autoType.isNotEmpty() && cycles[i].autoConf >= minConfidence)
+            rows.add (i);
+
+    if (rows.isEmpty())
+        return 0;
+
+    // as one undo step; typed automatically, so they stay "unconfirmed" until the file is saved
+    juce::Array<int> slots;
+    for (auto i : rows)
+        slots.add (slotForTypeName (cycles[i].autoType, true));
+
+    std::vector<Cycle> all;
+    for (int i = 0; i < cycles.size(); ++i)
+        all.push_back (cycles[i]);
+    for (int k = 0; k < rows.size(); ++k)
+        if (slots[k] >= 0)
+        {
+            all[(size_t) rows[k]].type = slots[k];
+            all[(size_t) rows[k]].confirmed = false;
+            ++applied;
+        }
+
+    cycles.replaceAll (std::move (all));
+    return applied;
+}
+
+/** Saving (or exporting) is the moment a person has looked at the file: every cycle becomes a confirmed example. */
+void MainComponent::recordLabels (const juce::String& source)
+{
+    if (audio == nullptr || snapshotOutput != juce::File())
+        return;
+
+    cycles.markAllConfirmed();
+
+    std::vector<LabelSample> out;
+    for (int i = 0; i < cycles.size(); ++i)
+    {
+        const auto& c = cycles[i];
+        if (c.type < 0)
+            continue;
+
+        LabelSample s;
+        if (! featuresFor (c.start, c.end, s.v))
+            continue;
+
+        s.fileName = audio->file.getFileName();
+        s.start = c.start;
+        s.end = c.end;
+        s.key = LabelStore::makeKey (s.fileName, audio->getNumSamples(), c.start, c.end); // length in samples: unchanged by embedding markers
+        s.category = cycles.getCategory();
+        s.type = cycles.getType (c.type).name;
+        s.source = source;
+        s.human = true;
+        s.suggestedCategory = cycles.getCategory();
+        s.suggestedType = c.autoType;
+        s.suggestedConfidence = c.autoConf;
+        s.rating = c.rating;
+        s.ng = c.ng;
+        s.attributes = c.attributes;
+        out.push_back (s);
+    }
+
+    labelStore.upsert (std::move (out));
+}
+
+//==============================================================================
 // Category -> Prefix / Type names
 //==============================================================================
 CategoryProfile MainComponent::resolveCategoryProfile (const juce::String& name) const
@@ -1276,6 +1459,9 @@ void MainComponent::showMarkersMenu()
     menu.addItem (1, WT_U8 ("WAV 内のマーカーを読み込む (RX など)"), audio != nullptr);
     menu.addItem (2, WT_U8 ("WAV にマーカーを書き込む   ") + keyMap.describe (Action::SaveWav), audio != nullptr);
     menu.addSeparator();
+    menu.addItem (4, WT_U8 ("候補の Type を採用 (選んだサイクル)   ") + keyMap.describe (Action::AcceptSuggestion), audio != nullptr);
+    menu.addItem (5, WT_U8 ("候補をすべて適用 (確信度 70% 以上)"), audio != nullptr);
+    menu.addSeparator();
     menu.addItem (3, WT_U8 ("Raw フォルダ: ") + (rawDir.getFullPathName().isEmpty() ? WT_U8 ("(未設定)") : rawDir.getFullPathName()) + WT_U8 ("  を変更..."));
 
     juce::Component::SafePointer<MainComponent> safe (this);
@@ -1288,6 +1474,15 @@ void MainComponent::showMarkersMenu()
             safe->saveMarkersToWav();
         else if (result == 3)
             safe->chooseRawFolder ({});
+        else if (result == 4)
+            safe->acceptSuggestions (safe->list.getSelectedRows());
+        else if (result == 5)
+        {
+            const auto n = safe->applyAllSuggestions (0.7f);
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, WT_U8 ("候補の適用"),
+                                                    n > 0 ? juce::String (n) + WT_U8 (" 件に Type を付けました(「(自動)」と表示。保存すると確認済みになります。Ctrl+Z で戻せます)")
+                                                          : WT_U8 ("確信度 70% 以上の候補がありません。"));
+        }
     });
 }
 
@@ -1424,6 +1619,7 @@ void MainComponent::embedFinished (const EmbedResult& result, const juce::File& 
         return;
     }
 
+    recordLabels ("editor");
     inboxQueue.markReviewed (dest.getFullPathName());
     inboxQueue.save();
     updateInboxBadge();
@@ -1462,7 +1658,17 @@ int MainComponent::applyEmbeddedState (const WtagData& data)
                     ++added;
                 }
         }
-        restored.push_back ({ c.start, c.end, slot });
+        Cycle restoredCycle;
+        restoredCycle.start = c.start;
+        restoredCycle.end = c.end;
+        restoredCycle.type = slot;
+        restoredCycle.autoType = c.autoType;
+        restoredCycle.autoConf = c.autoConf;
+        restoredCycle.confirmed = c.confirmed;
+        restoredCycle.rating = c.rating;
+        restoredCycle.ng = c.ng;
+        restoredCycle.attributes = c.attributes;
+        restored.push_back (restoredCycle);
     }
 
     cycles.replaceAll (std::move (restored), false);
@@ -1605,6 +1811,9 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         case Action::AutoSplit:     showAutoSplitDialog(); break;
         case Action::ImportMarkers: doImportMarkers(); break;
         case Action::SaveWav:       saveMarkersToWav(); break;
+        case Action::AcceptSuggestion:
+            acceptSuggestions (list.getSelectedRows());
+            break;
         default:
             if (action >= Action::Type1 && action <= Action::Type9)
                 handleTypeKey ((int) action - (int) Action::Type1);

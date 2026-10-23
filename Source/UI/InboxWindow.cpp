@@ -6,7 +6,7 @@ namespace wt
 {
 namespace
 {
-enum Column { colStatus = 1, colName, colTime, colCycles, colHint, colMessage };
+enum Column { colStatus = 1, colName, colTime, colCycles, colConfidence, colHint, colMessage };
 
 juce::Colour statusColour (const juce::String& s)
 {
@@ -54,6 +54,11 @@ InboxPanel::InboxPanel (InboxQueue& q, Hooks h)
     statusLabel.setColour (juce::Label::textColourId, theme::textDim);
     addAndMakeVisible (statusLabel);
 
+    orderToggle.setButtonText (WT_U8 ("確認が必要なものを、確信度の低い順に並べる"));
+    orderToggle.setToggleState (true, juce::dontSendNotification);
+    orderToggle.onClick = [this] { lastSize = -1; refresh(); };
+    addAndMakeVisible (orderToggle);
+
     table.setRowHeight (24);
     table.setColour (juce::ListBox::backgroundColourId, theme::background);
     table.setColour (juce::ListBox::outlineColourId, theme::outline);
@@ -65,6 +70,7 @@ InboxPanel::InboxPanel (InboxQueue& q, Hooks h)
     header.addColumn (WT_U8 ("ファイル"), colName, 300, 120, 700, juce::TableHeaderComponent::notSortable);
     header.addColumn (WT_U8 ("取り込み時刻"), colTime, 110, 90, 160, juce::TableHeaderComponent::notSortable);
     header.addColumn (WT_U8 ("サイクル"), colCycles, 70, 50, 100, juce::TableHeaderComponent::notSortable);
+    header.addColumn (WT_U8 ("確信度 / 要確認"), colConfidence, 130, 90, 200, juce::TableHeaderComponent::notSortable);
     header.addColumn (WT_U8 ("ラベル"), colHint, 150, 80, 300, juce::TableHeaderComponent::notSortable);
     header.addColumn (WT_U8 ("メッセージ"), colMessage, 320, 100, 900, juce::TableHeaderComponent::notSortable);
     header.setStretchToFitActive (true);
@@ -86,7 +92,7 @@ InboxPanel::InboxPanel (InboxQueue& q, Hooks h)
             hooks.openItem (*item);
     };
     reviewedButton.onClick = [this] {
-        const auto row = table.getSelectedRow();
+        const auto row = selectedIndex();
         if (row >= 0)
         {
             queue.setStatus (row, "reviewed");
@@ -100,7 +106,7 @@ InboxPanel::InboxPanel (InboxQueue& q, Hooks h)
             hooks.retryItem (*item);
     };
     removeButton.onClick = [this] {
-        const auto row = table.getSelectedRow();
+        const auto row = selectedIndex();
         if (row >= 0)
         {
             queue.remove (row);
@@ -124,10 +130,18 @@ InboxPanel::~InboxPanel()
     table.setModel (nullptr);
 }
 
-const QueueItem* InboxPanel::selectedItem() const
+int InboxPanel::selectedIndex() const
 {
     const auto row = table.getSelectedRow();
-    return row >= 0 && row < queue.size() ? &queue.getItems()[(size_t) row] : nullptr;
+    if (row < 0 || row >= (int) displayOrder.size())
+        return -1;
+    return displayOrder[(size_t) row];
+}
+
+const QueueItem* InboxPanel::selectedItem() const
+{
+    const auto index = selectedIndex();
+    return index >= 0 && index < queue.size() ? &queue.getItems()[(size_t) index] : nullptr;
 }
 
 void InboxPanel::refresh()
@@ -154,6 +168,17 @@ void InboxPanel::refresh()
     {
         lastSize = queue.size();
         lastNew = queue.countNew();
+
+        if (orderToggle.getToggleState())
+        {
+            displayOrder = queue.reviewOrder();
+        }
+        else
+        {
+            displayOrder.clear();
+            for (int i = 0; i < queue.size(); ++i)
+                displayOrder.push_back (i);
+        }
         table.updateContent();
     }
     table.repaint();
@@ -188,7 +213,9 @@ void InboxPanel::resized()
     statusLabel.setBounds (row.removeFromRight (juce::jmin (360, row.getWidth() / 2)));
     watchToggle.setBounds (row);
 
-    r.removeFromTop (8);
+    r.removeFromTop (4);
+    orderToggle.setBounds (r.removeFromTop (24));
+    r.removeFromTop (6);
     auto bottom = r.removeFromBottom (30);
     r.removeFromBottom (6);
     openButton.setBounds (bottom.removeFromLeft (120));
@@ -211,10 +238,10 @@ void InboxPanel::paintRowBackground (juce::Graphics& g, int row, int, int, bool 
 
 void InboxPanel::paintCell (juce::Graphics& g, int row, int column, int width, int height, bool)
 {
-    if (row >= queue.size())
+    if (row >= (int) displayOrder.size())
         return;
 
-    const auto& q = queue.getItems()[(size_t) row];
+    const auto& q = queue.getItems()[(size_t) displayOrder[(size_t) row]];
     juce::String text;
     auto colour = theme::text;
 
@@ -224,6 +251,16 @@ void InboxPanel::paintCell (juce::Graphics& g, int row, int column, int width, i
         case colName:    text = juce::File (q.raw.isNotEmpty() ? q.raw : q.original).getFileName(); break;
         case colTime:    text = juce::Time (q.importedAt).formatted ("%m/%d %H:%M"); colour = theme::textDim; break;
         case colCycles:  text = q.status == "failed" ? juce::String() : juce::String (q.cycles); colour = theme::textDim; break;
+        case colConfidence:
+            if (q.status == "failed")
+                return;
+            text = q.confidence >= 0.0f ? juce::String ((int) std::round (q.confidence * 100.0f)) + "%" : juce::String (WT_U8 ("(候補なし)"));
+            if (q.autoTyped > 0)
+                text += WT_U8 ("  自動 ") + juce::String (q.autoTyped);
+            if (q.uncertain > 0)
+                text += WT_U8 ("  要確認 ") + juce::String (q.uncertain);
+            colour = q.uncertain > 0 ? juce::Colour (0xffe0cf4f) : theme::textDim;
+            break;
         case colHint:    text = q.category + (q.type.isNotEmpty() ? " / " + q.type : juce::String()); colour = theme::textDim; break;
         case colMessage: text = q.error; colour = q.status == "failed" ? juce::Colour (0xffe05a6c) : theme::textDim; break;
         default:         return;
@@ -236,8 +273,8 @@ void InboxPanel::paintCell (juce::Graphics& g, int row, int column, int width, i
 
 void InboxPanel::cellDoubleClicked (int row, int, const juce::MouseEvent&)
 {
-    if (row >= 0 && row < queue.size() && hooks.openItem)
-        hooks.openItem (queue.getItems()[(size_t) row]);
+    if (row >= 0 && row < (int) displayOrder.size() && hooks.openItem)
+        hooks.openItem (queue.getItems()[(size_t) displayOrder[(size_t) row]]);
 }
 
 //==============================================================================

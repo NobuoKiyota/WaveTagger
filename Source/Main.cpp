@@ -2,6 +2,8 @@
 #include "Core/TextDecode.h"
 #include "Core/EmbeddedState.h"
 #include "Core/Checks.h"
+#include "Core/LabelStore.h"
+#include "Core/Suggester.h"
 #include "Core/Clustering.h"
 #include "Core/FeatureStore.h"
 #include "Core/HardLinks.h"
@@ -68,7 +70,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -77,6 +79,8 @@ public:
                                         : args[0] == "--selftest-watcher" ? selfTestWatcher()
                                         : args[0] == "--selftest-organize" ? selfTestOrganize()
                                         : args[0] == "--selftest-checks" ? selfTestChecks()
+                                        : args[0] == "--selftest-learn" ? selfTestLearn()
+                                        : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
             quit();
@@ -805,6 +809,69 @@ private:
         InboxQueue loaded;
         loaded.load (queueFile);
         check (loaded.size() == 2 && loaded.getItems()[1].category == "TOOLS" && loaded.getItems()[1].cycles == 3, "queue survives a restart");
+
+        // 7. auto-typing with what has been learned, and the order a person should review in
+        {
+            const auto auto1 = inbox.getChildFile ("auto1.wav");
+            makeWav (auto1, 3);
+            juce::AudioBuffer<float> mono;
+            readAll (auto1, mono);
+            AudioData ad;
+            ad.sampleRate = 48000.0;
+            ad.buffer = mono;
+            const auto segs = detectSegments (ad, 0, ad.getNumSamples(), options.split);
+            bool gotFeatures = segs.size() == 3;
+            LabelStore labels (base.getChildFile ("labels"), "t");
+            for (size_t si = 0; si < segs.size(); ++si)
+                for (int i = 0; i < 3; ++i)
+                {
+                    LabelSample ls;
+                    FeatureVector fv {};
+                    gotFeatures = gotFeatures && computeSegmentFeatures (mono, 48000.0, segs[si].first, segs[si].second, fv);
+                    ls.key = "k" + juce::String ((int) si * 3 + i);
+                    ls.fileName = "k.wav";
+                    ls.v = fv;
+                    for (auto& x : ls.v)
+                        x += 0.001f * (float) i;
+                    ls.category = "TOOLS";
+                    ls.type = "Burst";
+                    labels.upsert (ls);
+                }
+            auto sug = std::make_shared<Suggester>();
+            sug->rebuild (labels);
+
+            InboxOptions learned = options;
+            learned.suggester = sug;
+            const auto ra = processInboxFile (auto1, learned, formats);
+            check (gotFeatures && ra.ok && ra.cycles == 3 && ra.autoTyped == 3 && ra.uncertain == 0 && ra.minConfidence > 0.0f,
+                   "with learned examples the 3 bursts are typed automatically (and reported)");
+            juce::var wt;
+            WtagData wd;
+            check (readWtag (ra.rawFile, wt) && parseWtag (wt, wd) && wd.cycles.size() == 3 && wd.cycles[0].typeName == "Burst" && ! wd.cycles[0].confirmed,
+                   "they are embedded as type Burst, marked not yet looked at");
+
+            const auto none = inbox.getChildFile ("auto2.wav");
+            makeWav (none, 2);
+            const auto rb = processInboxFile (none, options, formats);
+            check (rb.ok && rb.autoTyped == 0 && rb.uncertain == 2 && rb.minConfidence < 0.0f, "without examples nothing is typed: everything is left for a person");
+
+            InboxQueue q2;
+            auto done = ra;
+            done.minConfidence = 0.95f;
+            auto unsure = ra;
+            unsure.minConfidence = 0.4f;
+            unsure.uncertain = 1;
+            unsure.rawFile = raw.getChildFile ("u.wav");
+            auto nothing = rb;
+            nothing.rawFile = raw.getChildFile ("n.wav");
+            q2.add (done);     // index 2 after all three are added
+            q2.add (unsure);   // 1
+            q2.add (nothing);  // 0 (newest)
+            const auto order = q2.reviewOrder();
+            check (order.size() == 3 && q2.getItems()[(size_t) order[0]].raw == nothing.rawFile.getFullPathName() && q2.getItems()[(size_t) order[1]].raw == unsure.rawFile.getFullPathName()
+                       && q2.getItems()[(size_t) order[2]].raw == done.rawFile.getFullPathName(),
+                   "review order: nothing known first, then least certain, then fully typed");
+        }
         return ok;
     }
 
@@ -1407,6 +1474,399 @@ private:
                 bytes += (double) size * n;
             }
         std::printf ("size-collision groups=%d files=%d (stage 1 reads ~%.0f MB; the whole of these files is %.1f GB)\n", groups, files, files * 128.0 / 1024.0, bytes / 1.0e9);
+        return true;
+    }
+
+    /** The learning data and the suggestion engine. */
+    bool selfTestLearn()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        const auto dir = testRoot.getChildFile ("learn_test");
+        dir.deleteRecursively();
+
+        // four kinds of sound; each variant is a little different, and sits inside a longer, quiet buffer
+        enum Kind { hit = 0, rub = 1, click = 2, tone = 3 };
+        const char* typeNames[] = { "Hit", "Rub", "Click", "Tone" };
+        const char* categories[] = { "TOOLS", "PAPER", "TOOLS", "PAPER" };
+
+        struct Made
+        {
+            juce::AudioBuffer<float> buffer;
+            juce::int64 start, end;
+        };
+        const auto make = [] (Kind kind, int variant) {
+            const double sr = 48000.0;
+            juce::Random rnd (5000 + variant * 31 + (int) kind * 977);
+            Made m { juce::AudioBuffer<float> (1, (int) (3.0 * sr)), 0, 0 };
+            for (int i = 0; i < m.buffer.getNumSamples(); ++i)
+                m.buffer.setSample (0, i, (rnd.nextFloat() - 0.5f) * 0.0006f);
+
+            const auto length = kind == hit ? (int) ((0.35 + 0.02 * (variant % 5)) * sr) : kind == rub ? (int) ((1.2 + 0.05 * (variant % 6)) * sr)
+                              : kind == click ? (int) (0.008 * sr) : (int) ((0.8 + 0.05 * (variant % 5)) * sr);
+            m.start = (juce::int64) (0.4 * sr + variant * 400);
+            m.end = m.start + length;
+
+            float lp = 0.0f;
+            const auto coeff = 0.25f + 0.03f * (float) (variant % 5);
+            for (int i = 0; i < length; ++i)
+            {
+                const auto t = (double) i / sr;
+                float v = 0.0f;
+                if (kind == hit)
+                    v = (rnd.nextFloat() * 2.0f - 1.0f) * 0.7f * (float) std::exp (-t * (12.0 + variant % 6));
+                else if (kind == rub)
+                {
+                    lp += coeff * ((rnd.nextFloat() * 2.0f - 1.0f) - lp);
+                    v = lp * 1.4f * (0.6f + 0.4f * (float) std::sin (t * (20.0 + variant)));
+                }
+                else if (kind == click)
+                    v = (rnd.nextFloat() * 2.0f - 1.0f) * 0.9f * (float) std::exp (-t * 900.0);
+                else
+                    v = 0.4f * (float) (std::sin (6.2831853 * (300.0 + 40.0 * variant) * t) * std::min (1.0, t * 12.0));
+                m.buffer.setSample (0, (int) m.start + i, v);
+            }
+            return m;
+        };
+
+        const auto sampleOf = [&] (Kind kind, int variant, bool human) {
+            const auto m = make (kind, variant);
+            LabelSample s;
+            s.fileName = juce::String (typeNames[kind]) + juce::String (variant) + ".wav";
+            s.start = m.start;
+            s.end = m.end;
+            s.key = LabelStore::makeKey (s.fileName, 12345, s.start, s.end);
+            computeSegmentFeatures (m.buffer, 48000.0, m.start, m.end, s.v);
+            s.category = categories[kind];
+            s.type = typeNames[kind];
+            s.source = "editor";
+            s.human = human;
+            return s;
+        };
+
+        // 1. segment features
+        {
+            const auto m = make (hit, 2);
+            FeatureVector a {}, b {};
+            std::vector<float> mono;
+            for (auto i = m.start; i < m.end; ++i)
+                mono.push_back (m.buffer.getSample (0, (int) i));
+            check (computeSegmentFeatures (m.buffer, 48000.0, m.start, m.end, a) && computeFeaturesFromMono (mono, 48000.0, (double) mono.size() / 48000.0, b) && a == b,
+                   "segment features equal the features of the same samples taken out");
+            FeatureVector whole {};
+            computeSegmentFeatures (m.buffer, 48000.0, 0, m.buffer.getNumSamples(), whole);
+            check (std::abs (a[45] - whole[45]) > 0.3f, "a segment is described by its own length, not the length of the file it sits in");
+            check (! computeSegmentFeatures (m.buffer, 48000.0, 100, 120, a), "a few samples are refused, not guessed");
+        }
+
+        // 2. the label store
+        LabelStore store (dir, "PC-A");
+        std::vector<LabelSample> training, held;
+        for (int kind = 0; kind < 4; ++kind)
+            for (int variant = 0; variant < 12; ++variant)
+                (variant < 8 ? training : held).push_back (sampleOf ((Kind) kind, variant, true));
+        const auto trainingCopy = training;
+        store.upsert (std::move (training));
+        check (store.size() == 32 && store.humanLabelCount() == 32 && dir.getChildFile ("labels_PC-A.jsonl").existsAsFile(), "labels are kept and written to this PC's own file");
+
+        LabelStore reopened (dir, "PC-A");
+        reopened.load();
+        bool same = reopened.size() == 32;
+        for (const auto& s : trainingCopy)
+        {
+            const auto* r = reopened.find (s.key);
+            same = same && r != nullptr && r->type == s.type && r->category == s.category && r->start == s.start && std::abs (r->v[3] - s.v[3]) < 1.0e-3f;
+        }
+        check (same, "everything comes back after a restart (labels, ranges, features)");
+        check (LabelStore::makeKey ("Pen_Push01.WAV", 99, 5, 10) == "pen_push01.wav|99|5|10", "keys ignore case and drive letters (file name + size + range)");
+
+        // two PCs write separate files; the newest entry per key wins; damaged lines do not matter
+        {
+            LabelStore a (dir, "PC-A"), b (dir, "PC-B");
+            LabelSample x = sampleOf (hit, 0, true);
+            x.key = "shared|1|0|0";
+            x.type = "FromA";
+            x.updatedAt = 1000;
+            a.upsert (x);
+            x.type = "FromB";
+            x.updatedAt = 2000;
+            b.upsert (x);
+            dir.getChildFile ("labels_PC-B.jsonl").appendText ("{ this line is damaged\n", false, false);
+
+            LabelStore merged (dir, "PC-C");
+            merged.load();
+            check (merged.find ("shared|1|0|0") != nullptr && merged.find ("shared|1|0|0")->type == "FromB" && merged.size() == 33,
+                   "two PCs' files merge: the newest entry wins and a damaged line is skipped");
+        }
+
+        // 3. the suggestion engine
+        Suggester empty;
+        empty.rebuild (LabelStore());
+        check (! empty.isReady() && ! empty.suggest (held[0].v).valid(), "with too few labels it makes no suggestion at all");
+
+        // unconfirmed automatic labels (human = false) and NG sounds must never be learned from
+        LabelStore store2 (dir.getChildFile ("second"), "PC-A");
+        store2.upsert (trainingCopy);
+        for (int i = 0; i < 10; ++i)
+        {
+            auto bad = sampleOf (rub, i, false);
+            bad.key += "|auto";
+            bad.type = "Wrong";
+            bad.category = "NOPE";
+            store2.upsert (bad);
+        }
+        auto ng = sampleOf (tone, 9, true);
+        ng.key += "|ng";
+        ng.type = "BadTake";
+        ng.ng = true;
+        store2.upsert (ng);
+
+        Suggester engine;
+        engine.rebuild (store2);
+        check (engine.isReady() && engine.sampleCount() == 32, "only human-confirmed, non-NG labels are used (32 of 43)");
+
+        int right = 0, categoryRight = 0;
+        double confRight = 0.0;
+        for (const auto& h : held)
+        {
+            const auto sug = engine.suggest (h.v);
+            if (sug.type == h.type)
+            {
+                ++right;
+                confRight += sug.confidence;
+            }
+            categoryRight += sug.category == h.category ? 1 : 0;
+        }
+        std::printf ("INFO  held-out accuracy: %d / %d types, %d / %d categories, mean confidence when right = %.2f\n",
+                     right, (int) held.size(), categoryRight, (int) held.size(), right > 0 ? confRight / right : 0.0);
+        check (right >= (int) held.size() * 9 / 10, "sounds it has never heard are typed correctly (>= 90 %)");
+        check (right > 0 && confRight / right > 0.6, "and with high confidence when it is right");
+
+        // something unlike anything labelled: loud, long, wide-band noise
+        juce::AudioBuffer<float> odd (1, 48000 * 3);
+        juce::Random rnd (4242);
+        for (int i = 0; i < odd.getNumSamples(); ++i)
+            odd.setSample (0, i, (rnd.nextFloat() * 2.0f - 1.0f) * 0.9f);
+        FeatureVector oddFeatures {};
+        computeSegmentFeatures (odd, 48000.0, 0, odd.getNumSamples(), oddFeatures);
+        const auto oddSuggestion = engine.suggest (oddFeatures);
+        check (oddSuggestion.confidence < (float) (confRight / right) * 0.8f, "a sound unlike everything labelled gets a clearly lower confidence");
+
+        // category hint: PAPER only has Rub and Tone, so a Hit can only be one of those
+        const auto hinted = engine.suggest (held[0].v, "PAPER"); // held[0] is a Hit (TOOLS)
+        check (hinted.category == "PAPER" && (hinted.type == "Rub" || hinted.type == "Tone"), "with a Category chosen, only that Category's Types are offered");
+
+        const auto top = engine.suggestTop (held[1].v, 3);
+        bool sorted = ! top.empty();
+        for (size_t i = 1; i < top.size(); ++i)
+            sorted = sorted && top[i - 1].confidence >= top[i].confidence;
+        check (sorted && top.size() >= 1 && top[0].type == held[1].type, "the top-3 list is ordered by confidence");
+
+        // more labels help: a type that was not known is learned by one more saved example set
+        store2.upsert (sampleOf (hit, 11, true));
+        engine.rebuild (store2);
+        check (engine.sampleCount() == 33, "a newly saved label is used as soon as the engine is rebuilt");
+
+        // ---- the editor end to end: save -> learn -> suggest -> accept / apply all / undo -> log what was decided
+        {
+            testRoot.getChildFile ("settings.json").replaceWithText ("{\"libraryRoots\":[\"Z:\\\\none\"]}");
+
+            // one session: 12 labelled sounds (3 per kind) followed by 4 new ones the user has not typed yet
+            struct Plan
+            {
+                Kind kind;
+                int variant;
+                bool typed;
+            };
+            std::vector<Plan> plan;
+            for (int v = 0; v < 3; ++v)
+                for (int k = 0; k < 4; ++k)
+                    plan.push_back ({ (Kind) k, v, true });
+            for (int k = 0; k < 4; ++k)
+                plan.push_back ({ (Kind) k, 7, false });
+
+            auto data = std::make_shared<AudioData>();
+            data->sampleRate = 48000.0;
+            data->file = testRoot.getChildFile ("learn_test").getChildFile ("session.wav");
+            data->buffer.setSize (1, (int) (plan.size() * 2.5 * 48000.0));
+            data->buffer.clear();
+            std::vector<std::pair<juce::int64, juce::int64>> ranges;
+            for (size_t i = 0; i < plan.size(); ++i)
+            {
+                const auto m = make (plan[i].kind, plan[i].variant);
+                const auto base = (juce::int64) (i * 2.5 * 48000.0) + 24000;
+                for (auto s = m.start; s < m.end; ++s)
+                    data->buffer.setSample (0, (int) (base + (s - m.start)), m.buffer.getSample (0, (int) s));
+                ranges.emplace_back (base, base + (m.end - m.start));
+            }
+            data->peaks.build (data->buffer);
+
+            LabelStore* seen = nullptr;
+            int learnedTotal = 0;
+            {
+                MainComponent m;
+                m.testLoadAudio (data);
+                auto& cy = m.testCyclesMutable();
+                for (int k = 0; k < 4; ++k)
+                    cy.setTypeName (k, typeNames[k]);
+                cy.setCategory ("TOOLS");
+                for (size_t i = 0; i < plan.size(); ++i)
+                    cy.add (ranges[i].first, ranges[i].second, plan[i].typed ? (int) plan[i].kind : -1);
+
+                check (m.testLabelStore().size() == 0, "nothing is learned just from typing: only from saving");
+                m.testRecord ("editor");
+                check (m.testLabelStore().size() == 12 && m.testLabelStore().humanLabelCount() == 12, "saving records the 12 typed cycles as confirmed examples");
+
+                for (int i = 0; i < 40; ++i)
+                    m.testSuggestTick();
+                int suggested = 0, correct = 0;
+                for (int i = 12; i < 16; ++i)
+                {
+                    suggested += cy[i].autoType.isNotEmpty() ? 1 : 0;
+                    correct += cy[i].autoType == typeNames[(int) plan[(size_t) i].kind] ? 1 : 0;
+                }
+                check (suggested == 4 && correct == 4 && cy[12].type == -1, "the four untyped cycles each get the right suggestion, and stay untyped");
+                check (cy[12].autoConf > 0.5f, "with a sensible confidence");
+
+                m.testAccept ({ 12 });
+                check (cy[12].type == (int) plan[12].kind && cy[12].confirmed, "accepting a suggestion types the cycle (confirmed: a person chose it)");
+
+                const auto applied = m.testApplyAll (0.7f);
+                check (applied >= 1 && applied <= 3 && cy[13].type == (applied >= 1 ? (int) plan[13].kind : -1) && ! cy[13].confirmed,
+                       "applying all confident suggestions types them as 'automatic, not yet looked at'");
+                cy.undo();
+                check (cy[13].type == -1 && cy[12].type == (int) plan[12].kind, "and that is a single undo step");
+                m.testApplyAll (0.7f);
+
+                // the user corrects one suggestion, then saves: the log keeps both the suggestion and the final answer
+                const auto wrongSlot = (int) plan[14].kind == 0 ? 1 : 0;
+                cy.setType ({ 14 }, wrongSlot);
+                m.testRecord ("editor");
+                const auto key14 = LabelStore::makeKey ("session.wav", data->getNumSamples(), ranges[14].first, ranges[14].second);
+                const auto key12 = LabelStore::makeKey ("session.wav", data->getNumSamples(), ranges[12].first, ranges[12].second);
+                const auto* corrected = m.testLabelStore().find (key14);
+                const auto* accepted = m.testLabelStore().find (key12);
+                check (corrected != nullptr && corrected->type == typeNames[wrongSlot] && corrected->suggestedType == typeNames[(int) plan[14].kind],
+                       "a corrected suggestion is logged as 'suggested X, person chose Y'");
+                check (accepted != nullptr && accepted->type == accepted->suggestedType && accepted->suggestedConfidence > 0.0f, "an accepted one is logged as agreeing with the suggestion");
+                int typedNow = 0;
+                for (int i = 0; i < cy.size(); ++i)
+                    typedNow += cy[i].type >= 0 ? 1 : 0;
+                learnedTotal = (int) m.testLabelStore().size();
+                check (learnedTotal == typedNow && typedNow >= 14 && cy[15].confirmed,
+                       "saving confirmed every cycle; every typed one is a stored example (untyped ones are not learned)");
+                seen = nullptr;
+            }
+            juce::ignoreUnused (seen);
+
+            // a new session (or another PC reading the same folder) starts with everything learned so far
+            MainComponent again;
+            check ((int) again.testLabelStore().size() == learnedTotal && learnedTotal > 0, "the next start (or another PC) has every example already");
+        }
+        return ok;
+    }
+
+    /** Read-only: how well would the suggestion engine do on real sounds? Folder names of the legacy library act as the "right answer". */
+    bool reportLearn()
+    {
+        const juce::String root ("G:\\SE");
+        if (! juce::File (root).isDirectory())
+            return false;
+
+        LibraryIndex index;
+        index.setRoots (juce::StringArray { root });
+        for (int i = 0; i < 3600 && (index.isScanning() || index.getData()->entries.empty()); ++i)
+            juce::Thread::sleep (50);
+        const auto data = index.getData();
+
+        std::map<juce::String, std::vector<juce::File>> byFolder;
+        for (const auto& e : data->entries)
+        {
+            const juce::File f (e.path);
+            if (e.size > 2000 && e.size < 20 * 1024 * 1024 && f.hasFileExtension ("wav"))
+                byFolder[f.getParentDirectory().getFullPathName()].push_back (f);
+        }
+
+        std::vector<juce::String> folders;
+        for (const auto& [name, files] : byFolder)
+            if (files.size() >= 24)
+                folders.push_back (name);
+        std::printf ("folders with >= 24 wav files: %d\n", (int) folders.size());
+
+        const auto stride = juce::jmax (1, (int) folders.size() / 30);
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+
+        struct Item
+        {
+            FeatureVector v;
+            juce::String label;
+            bool test;
+        };
+        std::vector<Item> items;
+        int used = 0;
+        for (size_t i = 0; i < folders.size() && used < 30; i += (size_t) stride, ++used)
+        {
+            const auto& files = byFolder[folders[i]];
+            const auto label = juce::File (folders[i]).getFileName();
+            int taken = 0;
+            for (size_t j = 0; j < files.size() && taken < 18; j += juce::jmax<size_t> (1, files.size() / 18), ++taken)
+            {
+                FeatureVector v {};
+                if (computeFeatures (formats, files[j], v))
+                    items.push_back ({ v, label, taken % 3 == 2 });
+            }
+        }
+
+        LabelStore store;
+        int n = 0;
+        for (const auto& it : items)
+            if (! it.test)
+            {
+                LabelSample s;
+                s.key = "k" + juce::String (n++);
+                s.v = it.v;
+                s.type = it.label;
+                s.category = "X";
+                store.upsert (s);
+            }
+
+        Suggester engine;
+        engine.rebuild (store);
+
+        int total = 0, right = 0, top3 = 0;
+        std::map<int, std::pair<int, int>> bucket; // confidence decile -> (right, total)
+        for (const auto& it : items)
+            if (it.test)
+            {
+                const auto list = engine.suggestTop (it.v, 3);
+                if (list.empty())
+                    continue;
+                ++total;
+                const auto ok1 = list[0].type == it.label;
+                right += ok1 ? 1 : 0;
+                for (const auto& sug : list)
+                    top3 += sug.type == it.label ? 1 : 0;
+                auto& b = bucket[juce::jmin (9, (int) (list[0].confidence * 10.0f))];
+                ++b.second;
+                b.first += ok1 ? 1 : 0;
+            }
+
+        std::printf ("classes=%d train=%d test=%d\n", used, n, total);
+        std::printf ("top-1 accuracy = %.1f %%   top-3 accuracy = %.1f %%\n", 100.0 * right / juce::jmax (1, total), 100.0 * top3 / juce::jmax (1, total));
+        for (const auto& [decile, rt] : bucket)
+            std::printf ("  confidence %d0-%d0%%: %d samples, %.0f %% right\n", decile, decile + 1, rt.second, 100.0 * rt.first / rt.second);
         return true;
     }
 

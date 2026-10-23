@@ -1,6 +1,7 @@
 #include "InboxProcessor.h"
 #include "AudioData.h"
 #include "CategoryProfiles.h"
+#include "AudioFeatures.h"
 #include "EmbeddedState.h"
 #include "Persistence.h"
 
@@ -208,9 +209,52 @@ InboxOutcome processInboxFile (const juce::File& file, const InboxOptions& optio
         model.setTypeName (0, out.typeHint);
 
     const auto segments = detectSegments (*audio, 0, audio->getNumSamples(), options.split);
-    for (const auto& [start, end] : segments)
-        model.add (start, end, out.typeHint.isNotEmpty() ? 0 : -1);
     out.cycles = (int) segments.size();
+
+    // a Type slot for a name: reuse, or take the first free one (the palette has nine)
+    const auto slotFor = [&model] (const juce::String& name) {
+        for (int i = 0; i < CycleModel::numSlots; ++i)
+            if (model.getType (i).name.equalsIgnoreCase (name))
+                return i;
+        for (int i = 0; i < CycleModel::numSlots; ++i)
+            if (model.getType (i).name.isEmpty())
+            {
+                model.setTypeName (i, name);
+                return i;
+            }
+        return -1;
+    };
+
+    float minConfidence = 2.0f;
+    for (size_t i = 0; i < segments.size(); ++i)
+    {
+        const auto& [start, end] = segments[i];
+        const auto fromFolder = out.typeHint.isNotEmpty(); // a person put the file in a Type folder: that is a decision
+        int slot = fromFolder ? 0 : -1;
+
+        Suggestion sug;
+        FeatureVector v {};
+        if (options.suggester != nullptr && options.suggester->isReady() && computeSegmentFeatures (audio->buffer, audio->sampleRate, start, end, v))
+            sug = options.suggester->suggest (v, category);
+
+        const auto idx = model.add (start, end, slot);
+        if (sug.valid())
+        {
+            minConfidence = juce::jmin (minConfidence, sug.confidence);
+            const auto apply = ! fromFolder && sug.confidence >= options.autoThreshold;
+            const auto autoSlot = apply ? slotFor (sug.type) : -1;
+            model.setSuggestion (idx, sug.type, sug.confidence, autoSlot, apply && autoSlot >= 0);
+            if (apply && autoSlot >= 0)
+            {
+                slot = autoSlot;
+                ++out.autoTyped;
+            }
+        }
+
+        if (slot < 0)
+            ++out.uncertain;
+    }
+    out.minConfidence = minConfidence <= 1.0f ? minConfidence : -1.0f;
 
     const auto result = embedMarkers (dest, dest, buildEmbedRequest (model, audio->sampleRate, options.appVersion));
     if (! result.ok)
@@ -364,6 +408,7 @@ void InboxWatcher::run()
             options.inbox = cfg.inbox;
             options.raw = cfg.raw;
             options.categoryNames = cfg.categoryNames;
+            options.suggester = cfg.suggester;
 
             const auto outcome = processInboxFile (file, options, formats);
             {

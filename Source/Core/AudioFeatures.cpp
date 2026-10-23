@@ -16,32 +16,11 @@ double melToHz (double m) { return 700.0 * (std::pow (10.0, m / 2595.0) - 1.0); 
 float toDb (double power) { return (float) (10.0 * std::log10 (power + 1.0e-12)); }
 } // namespace
 
-bool computeFeatures (juce::AudioFormatManager& formats, const juce::File& file, FeatureVector& out, double maxSeconds, juce::String* error)
+bool computeFeaturesFromMono (const std::vector<float>& mono, double sampleRate, double totalSeconds, FeatureVector& out)
 {
-    const auto fail = [&] (const juce::String& why) {
-        if (error != nullptr)
-            *error = why;
-        return false;
-    };
-
-    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
-    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels == 0)
-        return fail ("unreadable");
-
-    const auto sampleRate = reader->sampleRate;
-    const auto totalSeconds = (double) reader->lengthInSamples / sampleRate;
-    const auto n = (int) juce::jmin<juce::int64> (reader->lengthInSamples, (juce::int64) (maxSeconds * sampleRate));
+    const auto n = (int) mono.size();
     if (n < 64)
-        return fail ("too short");
-
-    juce::AudioBuffer<float> buffer ((int) reader->numChannels, n);
-    if (! reader->read (&buffer, 0, n, 0, true, true))
-        return fail ("read error");
-
-    std::vector<float> mono ((size_t) n, 0.0f);
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        juce::FloatVectorOperations::add (mono.data(), buffer.getReadPointer (ch), n);
-    juce::FloatVectorOperations::multiply (mono.data(), 1.0f / (float) buffer.getNumChannels(), n);
+        return false;
 
     // ---- level, crest, zero crossings
     double sumSq = 0.0;
@@ -217,4 +196,51 @@ bool computeFeatures (juce::AudioFormatManager& formats, const juce::File& file,
             v = 0.0f;
     return true;
 }
+
+bool computeFeatures (juce::AudioFormatManager& formats, const juce::File& file, FeatureVector& out, double maxSeconds, juce::String* error)
+{
+    const auto fail = [&] (const juce::String& why) {
+        if (error != nullptr)
+            *error = why;
+        return false;
+    };
+
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels == 0)
+        return fail ("unreadable");
+
+    const auto sampleRate = reader->sampleRate;
+    const auto totalSeconds = (double) reader->lengthInSamples / sampleRate;
+    const auto n = (int) juce::jmin<juce::int64> (reader->lengthInSamples, (juce::int64) (maxSeconds * sampleRate));
+    if (n < 64)
+        return fail ("too short");
+
+    juce::AudioBuffer<float> buffer ((int) reader->numChannels, n);
+    if (! reader->read (&buffer, 0, n, 0, true, true))
+        return fail ("read error");
+
+    std::vector<float> mono ((size_t) n, 0.0f);
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        juce::FloatVectorOperations::add (mono.data(), buffer.getReadPointer (ch), n);
+    juce::FloatVectorOperations::multiply (mono.data(), 1.0f / (float) buffer.getNumChannels(), n);
+
+    return computeFeaturesFromMono (mono, sampleRate, totalSeconds, out) ? true : fail ("too short");
+}
+
+bool computeSegmentFeatures (const juce::AudioBuffer<float>& buffer, double sampleRate, juce::int64 start, juce::int64 end, FeatureVector& out, double maxSeconds)
+{
+    start = juce::jlimit<juce::int64> (0, buffer.getNumSamples(), start);
+    end = juce::jlimit<juce::int64> (start, buffer.getNumSamples(), end);
+    const auto total = (double) (end - start) / sampleRate;
+    const auto n = (int) juce::jmin<juce::int64> (end - start, (juce::int64) (maxSeconds * sampleRate));
+    if (n < 64 || buffer.getNumChannels() == 0)
+        return false;
+
+    std::vector<float> mono ((size_t) n, 0.0f);
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        juce::FloatVectorOperations::add (mono.data(), buffer.getReadPointer (ch) + start, n);
+    juce::FloatVectorOperations::multiply (mono.data(), 1.0f / (float) buffer.getNumChannels(), n);
+    return computeFeaturesFromMono (mono, sampleRate, total, out);
+}
+
 } // namespace wt

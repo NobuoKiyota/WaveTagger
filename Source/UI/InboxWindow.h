@@ -31,20 +31,22 @@ public:
     void resized() override;
 
 private:
-    int getNumRows() override { return queue.size(); }
+    int getNumRows() override { return (int) displayOrder.size(); }
     void paintRowBackground (juce::Graphics&, int row, int width, int height, bool selected) override;
     void paintCell (juce::Graphics&, int row, int column, int width, int height, bool selected) override;
     void cellDoubleClicked (int row, int column, const juce::MouseEvent&) override;
     void timerCallback() override { refresh(); }
 
     const QueueItem* selectedItem() const;
+    int selectedIndex() const; // index into the queue (the table may show a different order)
 
     InboxQueue& queue;
     Hooks hooks;
 
     juce::Label inboxLabel, rawLabel, statusLabel, inboxPath, rawPath;
     juce::TextButton chooseInboxButton, chooseRawButton, scanButton;
-    juce::ToggleButton watchToggle;
+    juce::ToggleButton watchToggle, orderToggle;
+    std::vector<int> displayOrder;
     juce::TextButton openButton, reviewedButton, retryButton, removeButton, revealButton;
     juce::TableListBox table { "inbox", this };
     int lastSize = -1, lastNew = -1;

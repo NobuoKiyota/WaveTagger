@@ -5,6 +5,8 @@
 #include "Core/FeatureStore.h"
 #include "Core/InboxProcessor.h"
 #include "Core/InboxQueue.h"
+#include "Core/LabelStore.h"
+#include "Core/Suggester.h"
 #include "Core/CategoryProfiles.h"
 #include "Core/CycleModel.h"
 #include "Core/EmbeddedState.h"
@@ -47,6 +49,12 @@ public:
     juce::String testChangeFolder (const juce::File& dir) { return changeConfigFolder (dir); }
     const Catalog& testCatalog() const { return catalog; }
     int testApplyEmbedded (const WtagData& d) { return applyEmbeddedState (d); }
+    LabelStore& testLabelStore() { return labelStore; }
+    void testLoadAudio (AudioDataPtr d) { audioLoaded (std::move (d), {}); }
+    void testSuggestTick() { suggestTick(); }
+    void testRecord (const juce::String& source) { recordLabels (source); }
+    void testAccept (const juce::Array<int>& rows) { acceptSuggestions (rows); }
+    int testApplyAll (float threshold) { return applyAllSuggestions (threshold); }
     void testChooseCategoryNoDialog (const juce::String& name) { catalog.noteUsed (name); applyCategoryProfile (name, resolveCategoryProfile (name)); }
     const CategoryProfiles& testProfiles() const { return profiles; }
     CycleModel& testCyclesMutable() { return cycles; }
@@ -98,6 +106,13 @@ private:
     void setInboxWatching (bool on);
     void handleInboxOutcome (const InboxOutcome& outcome);
     InboxPanel::Hooks makeInboxHooks();
+    void setupLearning();
+    void suggestTick();
+    void recordLabels (const juce::String& source);
+    int slotForTypeName (const juce::String& name, bool createIfMissing);
+    void acceptSuggestions (const juce::Array<int>& rows);
+    int applyAllSuggestions (float minConfidence);
+    bool featuresFor (juce::int64 start, juce::int64 end, FeatureVector& out);
     void doImportMarkers();
     void showMarkersMenu();
     void saveMarkersToWav();
@@ -129,6 +144,11 @@ private:
     CycleModel cycles;
     Catalog catalog;
     CategoryProfiles profiles;
+    LabelStore labelStore;
+    Suggester suggester;
+    int suggesterRevision = -1;
+    std::map<std::pair<juce::int64, juce::int64>, FeatureVector> featureCache; // per cycle range of the open file
+    std::set<std::pair<juce::int64, juce::int64>> suggestedRanges;
     bool applyingProfile = false;
     KeyMap keyMap;
     LibraryIndex libraryIndex;

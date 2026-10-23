@@ -6,7 +6,7 @@ namespace wt
 {
 namespace
 {
-enum Column { colIndex = 1, colType, colNumber, colStart, colLength, colName };
+enum Column { colIndex = 1, colType, colNumber, colStart, colLength, colSuggest, colName };
 }
 
 /** Leaves Space / digits / undo keys to the main window so shortcuts work while the list has focus. */
@@ -51,6 +51,7 @@ CycleList::CycleList (CycleModel& m)
     header.addColumn ("No.", colNumber, 50, 40, 80, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Start", colStart, 110, 80, 200, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Length", colLength, 90, 70, 160, juce::TableHeaderComponent::notSortable);
+    header.addColumn (WT_U8 ("候補 (確信度)"), colSuggest, 170, 100, 300, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Output name", colName, 300, 120, 800, juce::TableHeaderComponent::notSortable);
     header.setStretchToFitActive (true);
     header.setPopupMenuActive (false);
@@ -148,6 +149,29 @@ void CycleList::paintCell (juce::Graphics& g, int row, int column, int width, in
         case colNumber:   text = juce::String (model.numberOf (row)).paddedLeft ('0', 2); break;
         case colStart:    text = formatTime ((double) c.start / sampleRate); break;
         case colLength:   text = juce::String ((double) (c.end - c.start) / sampleRate, 3) + " s"; break;
+        case colSuggest:
+        {
+            if (c.autoType.isEmpty() || c.autoConf < 0.0f)
+                return;
+
+            const auto percent = juce::String ((int) std::round (c.autoConf * 100.0f)) + "%";
+            auto sugColour = c.autoConf >= 0.7f ? juce::Colour (0xff6fd06f) : c.autoConf >= 0.4f ? juce::Colour (0xffe0cf4f) : theme::textDim;
+            if (c.type >= 0 && c.confirmed)
+            {
+                const auto agreed = model.getType (c.type).name.equalsIgnoreCase (c.autoType);
+                text = agreed ? WT_U8 ("✓ 採用 ") + c.autoType + " " + percent : WT_U8 ("✎ 修正 (候補 ") + c.autoType + " " + percent + ")";
+                sugColour = theme::textDim;
+            }
+            else
+            {
+                text = (c.type >= 0 ? WT_U8 ("(自動) ") : juce::String()) + c.autoType + " " + percent;
+            }
+
+            g.setColour (sugColour);
+            g.setFont (juce::FontOptions ("Meiryo UI", 13.0f, juce::Font::plain));
+            g.drawText (text, 4, 0, width - 8, height, juce::Justification::centredLeft, true);
+            return;
+        }
         case colName:     text = model.nameOf (row) + ".wav"; break;
         default:          return;
     }

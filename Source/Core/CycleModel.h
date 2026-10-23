@@ -16,6 +16,12 @@ struct Cycle
 {
     juce::int64 start = 0, end = 0;
     int type = -1;
+    juce::String autoType;  // what the suggestion engine proposed; kept even if the user then changed it (for the learning log)
+    float autoConf = -1.0f; // its confidence, or -1 if nothing was suggested
+    bool confirmed = true;  // false: typed automatically (Inbox / "apply suggestions") and not looked at yet
+    int rating = 0;         // 0 = unrated, 1..5 stars
+    bool ng = false;
+    juce::String attributes; // free text such as "strength=strong material=cardboard"
 };
 
 /** Cycles (sorted by start), the 9-slot type palette, naming template and undo history. */
@@ -61,6 +67,15 @@ public:
     void setRangeLive (int index, juce::int64 start, juce::int64 end);
     int finishEdit (int index);
     void remove (const juce::Array<int>& indices);
+    void setRating (const juce::Array<int>& indices, int stars);
+    void setNg (const juce::Array<int>& indices, bool ng);
+    void setAttributes (int index, const juce::String& text);
+    /** Records a suggestion on a cycle. If `apply`, the type is set too (and the cycle stays unconfirmed). */
+    /** Several suggestions at once (one change notification). typeName empty = clear. Never typed, never an undo step. */
+    void setSuggestions (const std::vector<int>& indices, const juce::StringArray& typeNames, const std::vector<float>& confidences);
+    void setSuggestion (int index, const juce::String& typeName, float confidence, int typeSlot, bool apply);
+    /** The user has looked at everything (e.g. saved to the WAV): no cycle is 'unconfirmed' any more. No undo step. */
+    void markAllConfirmed();
     void replaceAll (std::vector<Cycle> newCycles, bool undoable = true);
 
     int findAt (juce::int64 sample) const;

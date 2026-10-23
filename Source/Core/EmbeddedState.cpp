@@ -21,6 +21,12 @@ EmbedRequest buildEmbedRequest (const CycleModel& cycles, double sampleRate, con
         o->setProperty ("typeName", c.type >= 0 ? cycles.getType (c.type).name : juce::String());
         o->setProperty ("name", name);
         o->setProperty ("number", cycles.numberOf (i));
+        o->setProperty ("autoType", c.autoType);
+        o->setProperty ("autoConf", (double) c.autoConf);
+        o->setProperty ("confirmed", c.confirmed);
+        o->setProperty ("rating", c.rating);
+        o->setProperty ("ng", c.ng);
+        o->setProperty ("attrs", c.attributes);
         cycleArray.add (juce::var (o));
     }
 
@@ -66,6 +72,12 @@ bool parseWtag (const juce::var& json, WtagData& out)
         c.type = (int) item.getProperty ("type", -1);
         c.typeName = item.getProperty ("typeName", "").toString();
         c.name = item.getProperty ("name", "").toString();
+        c.autoType = item.getProperty ("autoType", "").toString();
+        c.autoConf = (float) (double) item.getProperty ("autoConf", -1.0);
+        c.confirmed = (bool) item.getProperty ("confirmed", true);
+        c.rating = (int) item.getProperty ("rating", 0);
+        c.ng = (bool) item.getProperty ("ng", false);
+        c.attributes = item.getProperty ("attrs", "").toString();
         if (c.end > c.start)
             out.cycles.push_back (c);
     }
