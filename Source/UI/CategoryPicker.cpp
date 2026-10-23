@@ -153,7 +153,7 @@ CategoryPicker::CategoryPicker (Catalog& c, const juce::String& current,
     addAndMakeVisible (mergeToggle);
 
     addButton.setButtonText (WT_U8 ("＋ 追加..."));
-    openButton.setButtonText (WT_U8 ("CSV の場所"));
+    openButton.setButtonText (WT_U8 ("xlsx の場所"));
     reloadButton.setButtonText (WT_U8 ("再読込"));
     for (auto* b : { &addButton, &openButton, &reloadButton })
     {
@@ -166,7 +166,7 @@ CategoryPicker::CategoryPicker (Catalog& c, const juce::String& current,
         if (cb)
             cb();
     };
-    openButton.onClick = [this] { catalog.getDirectory().revealToUser(); };
+    openButton.onClick = [this] { catalog.getEditTarget().revealToUser(); };
     reloadButton.onClick = [this] {
         catalog.reload();
         rebuild();
@@ -312,10 +312,12 @@ void CategoryPicker::rebuild()
             h.key = h.label;
             h.count = (int) b.items.size();
 
-            // the bucket holding the current category opens by itself
-            for (auto i : b.items)
-                if (cats[(size_t) i].name == currentCategory && h.key != freqKey)
-                    expandedGroups.insert (h.key);
+            // the bucket holding the current category opens by itself, once when the list is opened
+            // (doing it on every rebuild would make that bucket impossible to close)
+            if (firstBuild)
+                for (auto i : b.items)
+                    if (cats[(size_t) i].name == currentCategory && h.key != freqKey)
+                        expandedGroups.insert (h.key);
 
             h.expanded = expandedGroups.count (h.key) != 0;
             rows.push_back (h);
@@ -326,9 +328,14 @@ void CategoryPicker::rebuild()
     }
 
     const auto warnings = catalog.getWarnings();
-    footer.setText (warnings.isEmpty() ? juce::String() : WT_U8 ("⚠ CSV に ") + juce::String (warnings.size()) + WT_U8 (" 件の注意: ") + warnings[0],
+    const auto notices = catalog.getNotices();
+    footer.setColour (juce::Label::textColourId, warnings.isEmpty() ? theme::textDim : juce::Colour (0xffffc533));
+    footer.setText (! warnings.isEmpty() ? WT_U8 ("⚠ 表に ") + juce::String (warnings.size()) + WT_U8 (" 件の注意: ") + warnings[0]
+                    : ! notices.isEmpty() ? WT_U8 ("ℹ ") + notices[0]
+                                          : juce::String(),
                     juce::dontSendNotification);
 
+    firstBuild = false;
     list->updateSize (viewport.getMaximumVisibleWidth());
     list->repaint();
 }

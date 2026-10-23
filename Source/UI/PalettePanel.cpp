@@ -282,14 +282,14 @@ void PalettePanel::fillSlotsFromCategory()
 
 void PalettePanel::reportWriteFailure (const juce::File& file)
 {
-    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, WT_U8 ("CSV に書き込めませんでした"),
-                                            file.getFullPathName() + WT_U8 ("\n\nExcel などで開いたままになっていないか確認してください。"));
+    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, WT_U8 ("Category / Type の表に書き込めませんでした"),
+                                            file.getFullPathName() + WT_U8 ("\n\nExcel で開いたままになっていないか確認してください(閉じてからもう一度お試しください)。"));
 }
 
 void PalettePanel::promptAddCategory()
 {
     auto* w = new juce::AlertWindow (WT_U8 ("Category を追加"),
-                                     WT_U8 ("英語名(フォルダ名・ファイル名に使います)と日本語名を入力してください。\ncategories.csv に追記されます。"),
+                                     WT_U8 ("英語名(フォルダ名・ファイル名に使います)と日本語名を入力してください。\ncatalog.xlsx の Categories シートに追記されます。"),
                                      juce::MessageBoxIconType::NoIcon);
     w->addTextEditor ("name", "", "Category (EN)");
     w->addTextEditor ("jp", "", WT_U8 ("日本語"));
@@ -312,7 +312,7 @@ void PalettePanel::promptAddCategory()
         }
         else
         {
-            safe->reportWriteFailure (safe->catalog.getCategoriesFile());
+            safe->reportWriteFailure (safe->catalog.getEditTarget());
         }
     }), true);
 }
@@ -321,7 +321,7 @@ void PalettePanel::promptAddType (int slot)
 {
     const auto cat = model.getCategory();
     auto* w = new juce::AlertWindow (WT_U8 ("Type を追加"),
-                                     (cat.isEmpty() ? WT_U8 ("共通のタイプとして") : cat + WT_U8 (" に")) + WT_U8 (" types.csv へ追記し、この枠に入れます。"),
+                                     (cat.isEmpty() ? WT_U8 ("共通のタイプとして") : cat + WT_U8 (" に")) + WT_U8 (" catalog.xlsx の Types シートへ追記し、この枠に入れます。"),
                                      juce::MessageBoxIconType::NoIcon);
     w->addTextEditor ("name", "", "Type (EN)");
     w->addTextEditor ("jp", "", WT_U8 ("日本語"));
@@ -340,7 +340,7 @@ void PalettePanel::promptAddType (int slot)
         if (safe->catalog.addType (cat, name, w->getTextEditorContents ("jp")))
             safe->model.setTypeName (slot, name);
         else
-            safe->reportWriteFailure (safe->catalog.getTypesFile());
+            safe->reportWriteFailure (safe->catalog.getEditTarget());
     }), true);
 }
 

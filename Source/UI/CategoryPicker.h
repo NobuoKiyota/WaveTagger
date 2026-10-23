@@ -48,6 +48,7 @@ private:
     juce::TextButton addButton, openButton, reloadButton;
     juce::Label footer;
     std::vector<Row> rows;
+    bool firstBuild = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CategoryPicker)
 };

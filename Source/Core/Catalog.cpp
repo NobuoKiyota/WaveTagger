@@ -1,5 +1,7 @@
 #include "Catalog.h"
 #include "Categories.h"
+#include "TextDecode.h"
+#include "Xlsx.h"
 
 namespace wt
 {
@@ -82,16 +84,6 @@ juce::String toCsvLine (const juce::StringArray& fields)
     return out.joinIntoString (",") + "\r\n";
 }
 
-bool writeCsv (const juce::File& file, const std::vector<juce::StringArray>& rows)
-{
-    juce::MemoryOutputStream out;
-    static const juce::uint8 bom[] = { 0xEF, 0xBB, 0xBF }; // UTF-8 BOM so Excel reads the Japanese correctly
-    out.write (bom, sizeof (bom));
-    for (const auto& r : rows)
-        out << toCsvLine (r);
-    return file.replaceWithData (out.getData(), out.getDataSize());
-}
-
 struct SeedType
 {
     const char* category;
@@ -145,6 +137,94 @@ const SeedType seedTypes[] = {
     { "MACHINES", "Start", "始動" }, { "MACHINES", "Stop", "停止" },   { "MACHINES", "Loop", "動作中" }, { "MACHINES", "Click", "カチッ" },
     { "MACHINES", "Buzz", "ブーン" },
 };
+
+std::vector<juce::StringArray> readCsvRows (const juce::File& file)
+{
+    juce::MemoryBlock bytes;
+    if (! file.loadFileAsData (bytes))
+        return {};
+    return parseCsv (decodeTextBytes (bytes));
+}
+
+juce::MemoryBlock csvBytes (const std::vector<juce::StringArray>& rows)
+{
+    juce::MemoryOutputStream out;
+    static const juce::uint8 bom[] = { 0xEF, 0xBB, 0xBF }; // UTF-8 BOM so Excel reads the Japanese correctly
+    out.write (bom, sizeof (bom));
+    const auto width = rows.empty() ? 0 : rows.front().size(); // keep every row as wide as the header
+    for (auto r : rows)
+    {
+        while (r.size() < width)
+            r.add ({});
+        out << toCsvLine (r);
+    }
+    return out.getMemoryBlock();
+}
+
+juce::String md5Of (const juce::File& a, const juce::File& b)
+{
+    // small FNV-1a content hash (only used to notice that a CSV was edited by hand)
+    juce::uint64 h = 1469598103934665603ULL;
+    for (const auto& f : { a, b })
+    {
+        juce::MemoryBlock x;
+        if (f.loadFileAsData (x))
+            for (size_t i = 0; i < x.getSize(); ++i)
+            {
+                h ^= (juce::uint64) static_cast<const juce::uint8*> (x.getData())[i];
+                h *= 1099511628211ULL;
+            }
+        h ^= 0xFF;
+        h *= 1099511628211ULL;
+    }
+    return juce::String::toHexString ((juce::int64) h);
+}
+
+juce::File backupName (const juce::File& f)
+{
+    return f.getSiblingFile (f.getFileName() + ".bak-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S"));
+}
+
+struct SyncState
+{
+    juce::String dir, csvHash;
+    juce::int64 xlsxTime = 0;
+};
+
+juce::File stateFile() { return getAppDataDir().getChildFile ("catalog_state.json"); }
+
+SyncState readState()
+{
+    SyncState st;
+    const auto v = readJson (stateFile());
+    if (v.isObject())
+    {
+        st.dir = v.getProperty ("dir", "").toString();
+        st.csvHash = v.getProperty ("csvHash", "").toString();
+        st.xlsxTime = (juce::int64) v.getProperty ("xlsxTime", 0);
+    }
+    return st;
+}
+
+void writeState (const SyncState& st)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("dir", st.dir);
+    o->setProperty ("csvHash", st.csvHash);
+    o->setProperty ("xlsxTime", st.xlsxTime);
+    writeJson (stateFile(), juce::var (o));
+}
+
+void seedRows (std::vector<juce::StringArray>& categoryRows, std::vector<juce::StringArray>& typeRows)
+{
+    categoryRows = { { "Category", "Japanese", "Note" } };
+    for (const auto& c : wt::getCategories())
+        categoryRows.push_back ({ c.name, c.jp, "" });
+
+    typeRows = { { "Category", "Type", "Japanese", "Note" } };
+    for (const auto& t : seedTypes)
+        typeRows.push_back ({ t.category, t.name, t.jp, "" });
+}
 } // namespace
 
 juce::File Catalog::defaultDirectory()
@@ -163,37 +243,161 @@ void Catalog::setDirectory (const juce::File& dir)
 {
     directory = dir;
     directory.createDirectory();
-    writeSeedIfMissing();
     reload();
 }
 
-void Catalog::writeSeedIfMissing()
+juce::String Catalog::currentStamp() const
 {
-    if (! getCategoriesFile().existsAsFile())
-    {
-        std::vector<juce::StringArray> rows { { "Category", "Japanese", "Note" } };
-        for (const auto& c : wt::getCategories())
-            rows.push_back ({ c.name, c.jp, "" });
-        writeCsv (getCategoriesFile(), rows);
-    }
-
-    if (! getTypesFile().existsAsFile())
-    {
-        std::vector<juce::StringArray> rows { { "Category", "Type", "Japanese", "Note" } };
-        for (const auto& t : seedTypes)
-            rows.push_back ({ t.category, t.name, t.jp, "" });
-        writeCsv (getTypesFile(), rows);
-    }
+    return juce::String (getWorkbookFile().getLastModificationTime().toMilliseconds()) + "/"
+         + juce::String (getCategoriesFile().getLastModificationTime().toMilliseconds()) + "/"
+         + juce::String (getTypesFile().getLastModificationTime().toMilliseconds());
 }
 
 bool Catalog::reloadIfChanged()
 {
-    if (getCategoriesFile().getLastModificationTime() == loadedCategoriesTime
-        && getTypesFile().getLastModificationTime() == loadedTypesTime)
+    if (currentStamp() == loadedStamp)
         return false;
 
     reload();
     return true;
+}
+
+/**
+    Decides which side is newer and brings the other one up to date:
+      nothing there          -> seed workbook + CSVs
+      only CSVs              -> build the workbook from them (first run after upgrading)
+      workbook changed       -> regenerate the CSVs (a hand-edited CSV is backed up first)
+      only a CSV was edited  -> merge it into a new workbook (the old one is backed up)
+*/
+void Catalog::syncAndLoad (std::vector<juce::StringArray>& catRows, std::vector<juce::StringArray>& typeRows)
+{
+    const auto xlsxFile = getWorkbookFile(), catCsv = getCategoriesFile(), typeCsv = getTypesFile();
+    const auto hasX = xlsxFile.existsAsFile();
+    const auto hasC = catCsv.existsAsFile() && typeCsv.existsAsFile();
+    auto state = readState();
+    const auto knownDir = state.dir == directory.getFullPathName();
+
+    const auto readCsvTables = [&] {
+        catRows = readCsvRows (catCsv);
+        typeRows = readCsvRows (typeCsv);
+    };
+
+    auto syncFailed = false;
+    const auto writeXlsxTables = [&] (const juce::String& why) {
+        juce::String error;
+        std::vector<xlsx::Sheet> sheets { { categorySheetName, catRows }, { typeSheetName, typeRows } };
+        if (xlsx::write (xlsxFile, sheets, error))
+        {
+            notices.add (why);
+        }
+        else
+        {
+            syncFailed = true;
+            warnings.add ("catalog.xlsx: " + error);
+        }
+    };
+
+    const auto readXlsxTables = [&] {
+        std::vector<xlsx::Sheet> sheets;
+        juce::String error;
+        if (! xlsx::read (xlsxFile, sheets, error) || sheets.empty())
+        {
+            warnings.add ("catalog.xlsx could not be read (" + error + ")");
+            return false;
+        }
+
+        const auto find = [&] (const char* name, size_t fallback) -> const xlsx::Sheet* {
+            for (const auto& s : sheets)
+                if (s.name.equalsIgnoreCase (name))
+                    return &s;
+            return fallback < sheets.size() ? &sheets[fallback] : nullptr;
+        };
+
+        const auto* c = find ("Categories", 0);
+        const auto* t = find ("Types", 1);
+        if (c == nullptr || t == nullptr)
+        {
+            warnings.add ("catalog.xlsx needs two sheets: Categories and Types");
+            return false;
+        }
+
+        categorySheetName = c->name;
+        typeSheetName = t->name;
+        catRows = c->rows;
+        typeRows = t->rows;
+        return true;
+    };
+
+    // CSV outputs: only touched when the content differs; a hand-edited one is preserved as a backup
+    const auto writeCsvOutputs = [&] (bool backupExisting) {
+        for (const auto& [file, rows] : { std::pair<juce::File, const std::vector<juce::StringArray>*> { catCsv, &catRows },
+                                          std::pair<juce::File, const std::vector<juce::StringArray>*> { typeCsv, &typeRows } })
+        {
+            const auto data = csvBytes (*rows);
+            juce::MemoryBlock existing;
+            if (file.existsAsFile() && file.loadFileAsData (existing) && existing == data)
+                continue;
+
+            if (backupExisting && file.existsAsFile())
+            {
+                file.copyFileTo (backupName (file));
+                notices.add (file.getFileName() + " had been edited directly; the old copy was kept as a .bak file");
+            }
+            file.replaceWithData (data.getData(), data.getSize());
+        }
+    };
+
+    if (! hasX && ! hasC)
+    {
+        seedRows (catRows, typeRows);
+        writeXlsxTables ("catalog.xlsx was created");
+        writeCsvOutputs (false);
+    }
+    else if (! hasX)
+    {
+        readCsvTables();
+        writeXlsxTables ("catalog.xlsx was created from the existing CSV files");
+    }
+    else
+    {
+        const auto xTime = xlsxFile.getLastModificationTime().toMilliseconds();
+        const auto xChanged = ! knownDir || state.xlsxTime != xTime;
+        const auto cChanged = hasC && (! knownDir || state.csvHash != md5Of (catCsv, typeCsv));
+
+        if (! hasC || xChanged)
+        {
+            if (readXlsxTables())
+            {
+                // without saved state we cannot tell whether the CSV was hand-edited, so keep a backup if it differs
+                writeCsvOutputs (hasC && cChanged);
+                if (xChanged && hasC)
+                    notices.add ("categories.csv / types.csv were regenerated from catalog.xlsx");
+            }
+            else if (hasC)
+            {
+                readCsvTables();
+            }
+        }
+        else if (cChanged)
+        {
+            readCsvTables();
+            xlsxFile.copyFileTo (backupName (xlsxFile));
+            writeXlsxTables ("catalog.xlsx was updated from the edited CSV (the previous workbook was kept as a .bak file)");
+            writeCsvOutputs (false); // normalise the CSV to UTF-8 (it may have been saved as Shift-JIS)
+        }
+        else if (! readXlsxTables() && hasC)
+        {
+            readCsvTables();
+        }
+    }
+
+    if (syncFailed)
+        return; // keep the previous state: the edit is still pending and is retried on the next change or start
+
+    state.dir = directory.getFullPathName();
+    state.xlsxTime = xlsxFile.getLastModificationTime().toMilliseconds();
+    state.csvHash = md5Of (catCsv, typeCsv);
+    writeState (state);
 }
 
 void Catalog::reload()
@@ -201,39 +405,43 @@ void Catalog::reload()
     categories.clear();
     types.clear();
     warnings.clear();
+    notices.clear();
 
-    loadedCategoriesTime = getCategoriesFile().getLastModificationTime();
-    loadedTypesTime = getTypesFile().getLastModificationTime();
+    std::vector<juce::StringArray> catRows, typeRows;
+    syncAndLoad (catRows, typeRows);
+    loadedStamp = currentStamp();
 
     juce::StringArray seen;
     int line = 0;
-    for (const auto& r : parseCsv (getCategoriesFile().loadFileAsString()))
+    for (const auto& r : catRows)
     {
         ++line;
-        if (r.size() == 0 || r[0].isEmpty() || (line == 1 && r[0].equalsIgnoreCase ("Category")))
+        if (r.size() == 0 || r[0].trim().isEmpty() || (line == 1 && r[0].trim().equalsIgnoreCase ("Category")))
             continue;
 
-        if (seen.contains (r[0], true))
+        const auto name = r[0].trim();
+        if (seen.contains (name, true))
         {
-            warnings.add ("categories.csv: " + r[0] + " is listed twice");
+            warnings.add ("Categories: " + name + " is listed twice");
             continue;
         }
 
-        seen.add (r[0]);
-        categories.push_back ({ r[0], r[1], r[2] });
+        seen.add (name);
+        categories.push_back ({ name, r[1].trim(), r[2].trim() });
     }
 
     line = 0;
-    for (const auto& r : parseCsv (getTypesFile().loadFileAsString()))
+    for (const auto& r : typeRows)
     {
         ++line;
-        if (r.size() < 2 || r[0].isEmpty() || r[1].isEmpty() || (line == 1 && r[0].equalsIgnoreCase ("Category")))
+        if (r.size() < 2 || r[0].trim().isEmpty() || r[1].trim().isEmpty() || (line == 1 && r[0].trim().equalsIgnoreCase ("Category")))
             continue;
 
-        if (r[0] != commonCategory && ! seen.contains (r[0], true))
-            warnings.add ("types.csv: category " + r[0] + " is not in categories.csv");
+        const auto cat = r[0].trim();
+        if (cat != commonCategory && ! seen.contains (cat, true))
+            warnings.add ("Types: category " + cat + " is not in Categories");
 
-        types.push_back ({ r[0], { r[1], r[2], r[3] } });
+        types.push_back ({ cat, { r[1].trim(), r[2].trim(), r[3].trim() } });
     }
 
     sendChangeMessage();
@@ -260,14 +468,20 @@ std::vector<TypeInfo> Catalog::getTypes (const juce::String& category, bool incl
     return out;
 }
 
-bool Catalog::appendLine (const juce::File& file, const juce::StringArray& fields)
+bool Catalog::appendRow (bool toTypes, const juce::StringArray& fields)
 {
-    auto existing = file.loadFileAsString();
-    juce::String text;
-    if (existing.isNotEmpty() && ! existing.endsWithChar ('\n'))
-        text = "\r\n";
-    text += toCsvLine (fields);
-    return file.appendText (text, false, false);
+    if (getWorkbookFile().existsAsFile())
+    {
+        juce::String error;
+        return xlsx::appendRow (getWorkbookFile(), toTypes ? typeSheetName : categorySheetName, fields, error);
+    }
+
+    // no workbook (should not happen after sync): fall back to the CSV, normalised to UTF-8
+    const auto file = toTypes ? getTypesFile() : getCategoriesFile();
+    auto rows = readCsvRows (file);
+    rows.push_back (fields);
+    const auto data = csvBytes (rows);
+    return file.replaceWithData (data.getData(), data.getSize());
 }
 
 bool Catalog::addCategory (const juce::String& name, const juce::String& jp)
@@ -279,7 +493,7 @@ bool Catalog::addCategory (const juce::String& name, const juce::String& jp)
         if (c.name.equalsIgnoreCase (clean))
             return true;
 
-    const auto ok = appendLine (getCategoriesFile(), { clean, jp.trim(), "" });
+    const auto ok = appendRow (false, { clean, jp.trim(), "" });
     reload();
     return ok;
 }
@@ -295,7 +509,7 @@ bool Catalog::addType (const juce::String& category, const juce::String& name, c
         if (c.equalsIgnoreCase (cat) && t.name.equalsIgnoreCase (cleanName))
             return true;
 
-    const auto ok = appendLine (getTypesFile(), { cat, cleanName, jp.trim(), "" });
+    const auto ok = appendRow (true, { cat, cleanName, jp.trim(), "" });
     reload();
     return ok;
 }

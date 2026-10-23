@@ -19,10 +19,15 @@ struct TypeInfo
 };
 
 /**
-    Category / Type vocabulary, kept in two UTF-8 CSV files that Excel (or another AI) can edit:
-      categories.csv : Category, Japanese, Note
-      types.csv      : Category, Type, Japanese, Note      (Category "*" = common to every category)
-    Missing files are created from a built-in seed on first start; afterwards the files are the source of truth.
+    Category / Type vocabulary.
+
+    The master is catalog.xlsx (sheets "Categories" and "Types"), which Excel opens and saves without any
+    encoding trouble. categories.csv / types.csv (UTF-8 with BOM) are generated from it automatically for
+    other tools and AIs. If a CSV is edited directly instead, its content is merged back into the workbook
+    (the old workbook is kept as catalog.xlsx.bak-<time>). Excel's plain "CSV" (Shift-JIS) is read correctly too.
+
+      Categories : Category, Japanese, Note
+      Types      : Category, Type, Japanese, Note        (Category "*" = common to every category)
 */
 class Catalog : public juce::ChangeBroadcaster
 {
@@ -34,10 +39,13 @@ public:
 
     void setDirectory (const juce::File& dir);
     const juce::File& getDirectory() const { return directory; }
+    juce::File getWorkbookFile() const { return directory.getChildFile ("catalog.xlsx"); }
     juce::File getCategoriesFile() const { return directory.getChildFile ("categories.csv"); }
     juce::File getTypesFile() const { return directory.getChildFile ("types.csv"); }
+    /** The file a human should edit (the workbook once it exists). */
+    juce::File getEditTarget() const { return getWorkbookFile().existsAsFile() ? getWorkbookFile() : getCategoriesFile(); }
 
-    /** Cheap modification-time check; reloads and notifies if either file changed. */
+    /** Cheap modification-time check; syncs, reloads and notifies if any of the files changed. */
     bool reloadIfChanged();
     void reload();
 
@@ -45,8 +53,10 @@ public:
     /** Types registered for this category (then the common ones if includeCommon). */
     std::vector<TypeInfo> getTypes (const juce::String& category, bool includeCommon = true) const;
     juce::StringArray getWarnings() const { return warnings; }
+    /** What the last sync did (e.g. "types.csv was regenerated"); informational. */
+    juce::StringArray getNotices() const { return notices; }
 
-    /** Appends a row to the CSV (UTF-8, Excel friendly) and reloads. Returns false if the file could not be written. */
+    /** Adds a row to the workbook (or the CSV if there is no workbook) and reloads. False if it could not be written. */
     bool addCategory (const juce::String& name, const juce::String& jp);
     bool addType (const juce::String& category, const juce::String& name, const juce::String& jp);
 
@@ -57,14 +67,15 @@ public:
     void usageFromVar (const juce::var& v);
 
 private:
-    void writeSeedIfMissing();
-    bool appendLine (const juce::File& file, const juce::StringArray& fields);
+    void syncAndLoad (std::vector<juce::StringArray>& categoryRows, std::vector<juce::StringArray>& typeRows);
+    bool appendRow (bool toTypes, const juce::StringArray& fields);
+    juce::String currentStamp() const;
 
     juce::File directory;
     std::vector<CategoryInfo> categories;
     std::vector<std::pair<juce::String, TypeInfo>> types; // category -> type
-    juce::StringArray warnings;
+    juce::StringArray warnings, notices;
     std::map<juce::String, int> usage;
-    juce::Time loadedCategoriesTime, loadedTypesTime;
+    juce::String loadedStamp, categorySheetName { "Categories" }, typeSheetName { "Types" };
 };
 } // namespace wt

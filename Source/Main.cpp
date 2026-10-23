@@ -1,4 +1,6 @@
 #include "Core/Catalog.h"
+#include "Core/TextDecode.h"
+#include "Core/Xlsx.h"
 #include "UI/CategoryPicker.h"
 #include "UI/InputSettings.h"
 #include "UI/MainComponent.h"
@@ -54,9 +56,9 @@ public:
             return;
         }
 
-        if (args.size() >= 1 && args[0] == "--selftest-catalog")
+        if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load"))
         {
-            setApplicationReturnValue (selfTestCatalog() ? 0 : 1);
+            setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog() : selfTestCatalogLoad()) ? 0 : 1);
             quit();
             return;
         }
@@ -112,7 +114,7 @@ private:
         quit();
     }
 
-    /** Exercises the CSV round trip (add, append, reload, duplicate handling) in the isolated data folder. */
+    /** Exercises the workbook / CSV sync in the isolated data folder (see CLAUDE.md). */
     bool selfTestCatalog()
     {
         // belt and braces: only ever wipe a folder that lives inside the WT_APPDATA test area
@@ -124,41 +126,119 @@ private:
             return false;
         }
         dir.deleteRecursively();
-        catalog.setDirectory (dir);
+        (testRoot.getChildFile ("catalog_state.json")).deleteFile();
 
         bool ok = true;
         const auto check = [&ok] (bool cond, const char* what) {
             std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
             ok = ok && cond;
         };
+        const auto jp = [] (const char* s) { return juce::String::fromUTF8 (s); };
+        const auto csvText = [&] (const juce::File& f) {
+            juce::MemoryBlock b;
+            f.loadFileAsData (b);
+            return decodeTextBytes (b);
+        };
 
+        // 1. first start
+        catalog.setDirectory (dir);
+        check (catalog.getWorkbookFile().existsAsFile() && catalog.getCategoriesFile().existsAsFile() && catalog.getTypesFile().existsAsFile(),
+               "first start creates catalog.xlsx and both CSV files");
         const auto baseCats = catalog.getCategories().size();
-        check (baseCats > 50, "seed categories written and read back");
+        check (baseCats > 50, "seed categories round-trip through the workbook");
         check (catalog.getTypes ("TOOLS").size() > catalog.getTypes ("TOOLS", false).size(), "TOOLS has own + common types");
+        check (catalog.getCategories()[0].jp.isNotEmpty() && csvText (catalog.getCategoriesFile()).contains (catalog.getCategories()[0].jp),
+               "Japanese is intact in the workbook and in the generated CSV");
 
-        check (catalog.addCategory ("ark", juce::String::fromUTF8 ("方舟")), "addCategory ok");
-        check (catalog.getCategories().size() == baseCats + 1, "new category appears after reload");
-        check (catalog.getCategories().back().name == "ARK" && catalog.getCategories().back().jp == juce::String::fromUTF8 ("方舟"),
-               "name upper-cased, Japanese preserved");
+        // 2. app-side additions go into the workbook and flow out to the CSV
+        check (catalog.addCategory ("ark", jp ("方舟")), "addCategory writes to the workbook");
+        check (catalog.getCategories().size() == baseCats + 1 && catalog.getCategories().back().name == "ARK"
+                   && catalog.getCategories().back().jp == jp ("方舟"),
+               "new category reloaded (upper-cased, Japanese preserved)");
+        check (csvText (catalog.getCategoriesFile()).contains (jp ("ARK,方舟")), "generated categories.csv contains the new row");
         check (catalog.addCategory ("ARK", "dup") && catalog.getCategories().size() == baseCats + 1, "duplicate category not added twice");
 
         const auto before = catalog.getTypes ("TOOLS", false).size();
-        check (catalog.addType ("TOOLS", "Pry", juce::String::fromUTF8 ("こじ開ける, 剥がす")), "addType with comma in Japanese");
+        check (catalog.addType ("TOOLS", "Pry", jp ("こじ開ける, 剥がす")), "addType with a comma in the Japanese");
         const auto types = catalog.getTypes ("TOOLS", false);
-        check (types.size() == before + 1 && types.back().name == "Pry"
-                   && types.back().jp == juce::String::fromUTF8 ("こじ開ける, 剥がす"),
-               "comma-containing field survives quoting round trip");
+        check (types.size() == before + 1 && types.back().name == "Pry" && types.back().jp == jp ("こじ開ける, 剥がす"),
+               "comma-containing field survives the workbook round trip");
+        check (csvText (catalog.getTypesFile()).contains (jp ("\"こじ開ける, 剥がす\"")), "CSV quoting of that field is correct");
 
-        juce::FileInputStream in (catalog.getCategoriesFile());
-        char head[3] {};
-        in.read (head, 3);
-        check ((juce::uint8) head[0] == 0xEF && (juce::uint8) head[1] == 0xBB && (juce::uint8) head[2] == 0xBF, "file keeps UTF-8 BOM for Excel");
+        // 3. other sheets and formatting survive an app-side append
+        {
+            std::vector<xlsx::Sheet> sheets;
+            juce::String error;
+            xlsx::read (catalog.getWorkbookFile(), sheets, error);
+            sheets.push_back ({ "Notes", { { "memo" }, { jp ("消えてはいけないメモ") } } });
+            xlsx::write (catalog.getWorkbookFile(), sheets, error);
+            catalog.reload();
+            catalog.addType ("PAPER", "Flutter", jp ("はためく"));
+            sheets.clear();
+            xlsx::read (catalog.getWorkbookFile(), sheets, error);
+            check (sheets.size() == 3 && sheets[2].name == "Notes" && sheets[2].rows.size() == 2 && sheets[2].rows[1][0] == jp ("消えてはいけないメモ"),
+                   "appending a row leaves the other sheet untouched");
+        }
 
-        // an external edit (as Excel or another AI would do) is picked up
-        catalog.getTypesFile().appendText ("TOOLS,ExternalEdit,x,\r\n", false, false);
-        check (catalog.reloadIfChanged(), "external edit detected");
-        check (catalog.getTypes ("TOOLS", false).back().name == "ExternalEdit", "externally added type is loaded");
+        // 4. Excel's plain "CSV" (Shift-JIS) saved over categories.csv is read correctly and merged into the workbook
+        {
+            juce::MemoryBlock sjis = encodeShiftJis (jp ("Category,Japanese,Note\r\nSJIS_TEST,日本語テスト,\r\n"));
+            catalog.getCategoriesFile().replaceWithData (sjis.getData(), sjis.getSize());
+            check (! isUtf8Text (sjis), "test file really is Shift-JIS");
+            check (catalog.reloadIfChanged(), "Shift-JIS CSV edit detected");
+
+            bool found = false;
+            for (const auto& c : catalog.getCategories())
+                found = found || (c.name == "SJIS_TEST" && c.jp == jp ("日本語テスト"));
+            check (found, "Japanese read correctly from the Shift-JIS file");
+
+            juce::MemoryBlock regenerated;
+            catalog.getCategoriesFile().loadFileAsData (regenerated);
+            check (isUtf8Text (regenerated), "CSV normalised back to UTF-8");
+
+            int backups = 0;
+            for (const auto& f : dir.findChildFiles (juce::File::findFiles, false, "catalog.xlsx.bak-*"))
+                ++backups, juce::ignoreUnused (f);
+            check (backups >= 1, "previous workbook kept as a .bak file");
+
+            std::vector<xlsx::Sheet> sheets;
+            juce::String error;
+            xlsx::read (catalog.getWorkbookFile(), sheets, error);
+            bool inWorkbook = false;
+            for (const auto& r : sheets[0].rows)
+                inWorkbook = inWorkbook || (r.size() > 1 && r[0] == "SJIS_TEST");
+            check (inWorkbook, "edited CSV content merged into the workbook");
+        }
+
+        // 5. editing the workbook (as Excel would) regenerates the CSVs
+        {
+            std::vector<xlsx::Sheet> sheets;
+            juce::String error;
+            xlsx::read (catalog.getWorkbookFile(), sheets, error);
+            sheets[1].rows.push_back ({ "TOOLS", "ExcelRow", jp ("エクセルで追加"), "" });
+            juce::Thread::sleep (1100); // make sure the modification time differs
+            xlsx::write (catalog.getWorkbookFile(), sheets, error);
+            check (catalog.reloadIfChanged(), "workbook edit detected");
+            check (csvText (catalog.getTypesFile()).contains (jp ("TOOLS,ExcelRow,エクセルで追加")), "types.csv regenerated from the workbook");
+        }
         return ok;
+    }
+
+    /** Loads whatever workbook is already in the isolated config folder (e.g. one written by openpyxl) and prints what was read. */
+    bool selfTestCatalogLoad()
+    {
+        catalog.setDirectory (Catalog::defaultDirectory());
+        std::printf ("categories=%d\n", (int) catalog.getCategories().size());
+        for (size_t i = 0; i < juce::jmin<size_t> (3, catalog.getCategories().size()); ++i)
+            std::printf ("cat[%d]=%s|%s\n", (int) i, catalog.getCategories()[i].name.toRawUTF8(), catalog.getCategories()[i].jp.toRawUTF8());
+        std::printf ("types(TOOLS)=%d\n", (int) catalog.getTypes ("TOOLS", false).size());
+        for (const auto& t : catalog.getTypes ("TOOLS", false))
+            std::printf ("type=%s|%s\n", t.name.toRawUTF8(), t.jp.toRawUTF8());
+        for (const auto& w : catalog.getWarnings())
+            std::printf ("warning=%s\n", w.toRawUTF8());
+        for (const auto& n : catalog.getNotices())
+            std::printf ("notice=%s\n", n.toRawUTF8());
+        return true;
     }
 
     Catalog catalog;
