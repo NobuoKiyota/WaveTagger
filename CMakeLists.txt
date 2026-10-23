@@ -10,7 +10,9 @@ add_subdirectory(${JUCE_DIR} ${CMAKE_BINARY_DIR}/JUCE)
 juce_add_gui_app(WaveTagger
     PRODUCT_NAME "WaveTagger"
     COMPANY_NAME "kiyot"
-    VERSION ${PROJECT_VERSION})
+    VERSION ${PROJECT_VERSION}
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/icon.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/Resources/icon_small.png")
 
 file(GLOB_RECURSE WT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/*.cpp

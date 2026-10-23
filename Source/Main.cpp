@@ -2686,6 +2686,12 @@ private:
         const auto base = testRoot.getChildFile ("dataset_test");
         base.deleteRecursively();
 
+        // The main-window part below reads the catalogue and the project files in WT_APPDATA: start from a clean slate, so that what
+        // other tests (the catalogue test rewrites it) or an earlier run left there cannot change the result. Test folder only.
+        testRoot.getChildFile ("config").deleteRecursively();
+        testRoot.getChildFile ("projects").deleteRecursively();
+        testRoot.getChildFile ("catalog_state.json").deleteFile();
+
         // ---- ids and captions
         {
             const auto id = datasetClipId ("Take1.wav", 1000, 10, 20);
