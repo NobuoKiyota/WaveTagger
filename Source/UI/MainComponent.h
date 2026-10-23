@@ -1,12 +1,15 @@
 #pragma once
 
 #include "Core/AutoSplit.h"
+#include "Core/Catalog.h"
 #include "Core/CycleModel.h"
 #include "Core/LibraryIndex.h"
 #include "Core/PlaybackEngine.h"
 #include "Core/SpectrogramRenderer.h"
 #include "CycleList.h"
 #include "InputMap.h"
+#include "InputSettings.h"
+#include "KeyMap.h"
 #include "LibraryPanel.h"
 #include "OverviewBar.h"
 #include "PalettePanel.h"
@@ -64,7 +67,7 @@ private:
     void refreshLibraryInfo();
     void setLibraryRoots (const juce::StringArray& roots);
     void afterExport (const juce::File& destFolder);
-    void showMouseSettings();
+    void showInputSettings();
     void updateHint();
     bool confirmReselect (int type);
 
@@ -78,18 +81,20 @@ private:
     SpectrogramRenderer spectrogram;
     PlaybackEngine playback;
     CycleModel cycles;
+    Catalog catalog;
+    KeyMap keyMap;
     LibraryIndex libraryIndex;
     std::unique_ptr<LibraryWindow> libraryWindow;
     AudioDataPtr audio;
 
-    juce::TextButton openButton { "Open" }, audioButton { "Audio..." }, mouseButton { "Mouse..." };
+    juce::TextButton openButton { "Open" }, audioButton { "Audio..." }, inputButton { "Input..." };
     juce::TextButton importButton { "Import markers" }, splitButton { "Auto split" }, exportButton { "Export..." }, libraryButton { "Library" };
     juce::ToggleButton autoPreviewToggle { "Auto preview" }, continueToggle { "Continue numbering" };
     juce::Label fileLabel, blendLabel, floorLabel, hintLabel;
     juce::ComboBox schemeCombo;
     WheelMap wheelMap;
     juce::Slider blendSlider, floorSlider;
-    PalettePanel palette { cycles };
+    PalettePanel palette { cycles, catalog };
     OverviewBar overview { view };
     WaveView waveView { view, spectrogram };
     CycleList list { cycles };
@@ -104,6 +109,7 @@ private:
     int saveGeneration = 0;
     juce::String lastInfoKey;
     int snapshotWaits = 0;
+    int frameCounter = 0;
     int editingCycle = -1; // cycle whose range is being re-selected (double click)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)

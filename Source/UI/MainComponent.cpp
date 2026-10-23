@@ -21,7 +21,7 @@ MainComponent::MainComponent()
     formats.registerBasicFormats();
     setWantsKeyboardFocus (true);
 
-    for (auto* b : { &openButton, &audioButton, &importButton, &splitButton, &exportButton, &libraryButton, &mouseButton })
+    for (auto* b : { &openButton, &audioButton, &importButton, &splitButton, &exportButton, &libraryButton, &inputButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -48,7 +48,7 @@ MainComponent::MainComponent()
     splitButton.onClick = [this] { if (audio != nullptr) showAutoSplitDialog(); };
     exportButton.onClick = [this] { if (audio != nullptr) startExport(); };
     libraryButton.onClick = [this] { showLibrary(); };
-    mouseButton.onClick = [this] { showMouseSettings(); };
+    inputButton.onClick = [this] { showInputSettings(); };
 
     const auto schemes = theme::getSpectrogramSchemeNames();
     for (int i = 0; i < schemes.size(); ++i)
@@ -174,6 +174,7 @@ MainComponent::MainComponent()
     view.addChangeListener (this);
     cycles.addChangeListener (this);
     libraryIndex.addChangeListener (this);
+    catalog.addChangeListener (this);
     refreshLibraryInfo();
     updateHint();
     vblank = std::make_unique<juce::VBlankAttachment> (this, [this] { onVBlank(); });
@@ -188,6 +189,7 @@ MainComponent::~MainComponent()
     view.removeChangeListener (this);
     cycles.removeChangeListener (this);
     libraryIndex.removeChangeListener (this);
+    catalog.removeChangeListener (this);
     libraryWindow = nullptr;
     loader.removeAllJobs (true, 10000);
     spectrogram.onNewImage = nullptr;
@@ -210,8 +212,15 @@ void MainComponent::loadSettings()
                 roots.add (def);
     libraryIndex.setRoots (roots);
 
+    // Category / Type CSV folder: remembered once chosen so it never silently moves
+    const auto savedDir = s.getProperty ("configDir", "").toString();
+    catalog.setDirectory (savedDir.isNotEmpty() ? juce::File (savedDir) : Catalog::defaultDirectory());
+
     if (! s.isObject())
         return;
+
+    catalog.usageFromVar (s.getProperty ("categoryUsage", {}));
+    keyMap.fromVar (s.getProperty ("keys", {}));
 
     cycles.settingsFromVar (s.getProperty ("cycle", {}));
     exportDir = juce::File (s.getProperty ("exportDir", "").toString());
@@ -245,6 +254,9 @@ void MainComponent::saveNow()
     settings->setProperty ("autoPreview", autoPreviewToggle.getToggleState());
     settings->setProperty ("continueNumbering", continueToggle.getToggleState());
     settings->setProperty ("wheel", wheelMap.toVar());
+    settings->setProperty ("keys", keyMap.toVar());
+    settings->setProperty ("configDir", catalog.getDirectory().getFullPathName());
+    settings->setProperty ("categoryUsage", catalog.usageToVar());
     settings->setProperty ("scheme", schemeCombo.getSelectedId() - 1);
 
     juce::Array<juce::var> rootArray;
@@ -415,6 +427,9 @@ void MainComponent::stopPlayback()
 
 void MainComponent::onVBlank()
 {
+    if (++frameCounter % 120 == 0)
+        catalog.reloadIfChanged();
+
     const auto playing = playback.isPlaying();
 
     if (playing)
@@ -454,6 +469,10 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
     else if (source == &libraryIndex)
     {
         refreshLibraryInfo();
+    }
+    else if (source == &catalog)
+    {
+        scheduleSave();
     }
     else
     {
@@ -554,16 +573,16 @@ void MainComponent::updateHint()
     hintLabel.setColour (juce::Label::textColourId, theme::textDim);
 }
 
-void MainComponent::showMouseSettings()
+void MainComponent::showInputSettings()
 {
-    auto* content = new MouseSettingsComponent (wheelMap, [this] {
+    auto* content = new InputSettingsComponent (wheelMap, keyMap, [this] {
         updateHint();
         scheduleSave();
     });
 
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned (content);
-    options.dialogTitle = WT_U8 ("マウスホイールの割り当て");
+    options.dialogTitle = WT_U8 ("入力設定 (マウス / キーボード)");
     options.dialogBackgroundColour = theme::panel;
     options.useNativeTitleBar = true;
     options.resizable = false;
@@ -891,7 +910,7 @@ void MainComponent::resized()
     continueToggle.setBounds (bar.removeFromLeft (146));
     bar.removeFromLeft (8);
 
-    mouseButton.setBounds (bar.removeFromRight (74));
+    inputButton.setBounds (bar.removeFromRight (74));
     bar.removeFromRight (6);
     schemeCombo.setBounds (bar.removeFromRight (104));
     bar.removeFromRight (10);
@@ -915,17 +934,17 @@ void MainComponent::resized()
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
-    const auto code = key.getKeyCode();
-    const auto mods = key.getModifiers();
-    const auto plain = ! mods.isCommandDown() && ! mods.isAltDown();
+    const auto action = keyMap.find (key);
+    if (action == Action::None)
+        return false;
 
-    if (mods.isCommandDown() && code == 'O')
+    if (action == Action::Open)
     {
         showOpenDialog();
         return true;
     }
 
-    if (mods.isCommandDown() && code == 'L')
+    if (action == Action::Library)
     {
         showLibrary();
         return true;
@@ -934,60 +953,49 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (audio == nullptr)
         return false;
 
-    if (mods.isCommandDown())
-    {
-        if (code == 'A')
-            view.setSelection (0, audio->getNumSamples());
-        else if (code == 'Z' && ! mods.isShiftDown())
-            cycles.undo();
-        else if (code == 'Y' || (code == 'Z' && mods.isShiftDown()))
-            cycles.redo();
-        else if (code == 'E')
-            startExport();
-        else
-            return false;
-        return true;
-    }
-
-    if (! plain)
-        return false;
-
-    const auto ch = key.getTextCharacter();
-    if (ch >= '1' && ch <= '9')
-    {
-        handleTypeKey ((int) (ch - '1'));
-        return true;
-    }
-
     const auto centrePx = 0.5 * view.getWidth();
 
-    if (code == juce::KeyPress::spaceKey)          togglePlay();
-    else if (code == juce::KeyPress::returnKey)
+    switch (action)
     {
-        if (! confirmReselect (-2))
-            return false;
+        case Action::Export:        startExport(); break;
+        case Action::SelectAll:     view.setSelection (0, audio->getNumSamples()); break;
+        case Action::Undo:          cycles.undo(); break;
+        case Action::Redo:          cycles.redo(); break;
+        case Action::PlayStop:      togglePlay(); break;
+        case Action::Confirm:
+            if (! confirmReselect (-2))
+                return false;
+            break;
+        case Action::Cancel:
+            editingCycle = -1;
+            updateHint();
+            view.clearSelection();
+            break;
+        case Action::Delete:        deleteSelectedCycles(); break;
+        case Action::ToStart:       view.setCursor (0); view.ensureVisible (0); break;
+        case Action::ToEnd:         view.setCursor (audio->getNumSamples()); view.ensureVisible ((double) audio->getNumSamples()); break;
+        case Action::ZoomFit:       view.zoomToFit(); break;
+        case Action::ZoomSelection:
+            if (view.hasSelection())
+                view.zoomToRange (view.getSelectionStart(), view.getSelectionEnd());
+            break;
+        case Action::ToggleLoop:
+            transport.setLooping (! transport.isLooping());
+            playback.setLooping (transport.isLooping());
+            break;
+        case Action::ZoomIn:        view.zoomAround (centrePx, 0.5); break;
+        case Action::ZoomOut:       view.zoomAround (centrePx, 2.0); break;
+        case Action::ScrollLeft:    view.scrollPixels (-view.getWidth() * 0.1); break;
+        case Action::ScrollRight:   view.scrollPixels (view.getWidth() * 0.1); break;
+        case Action::AutoSplit:     showAutoSplitDialog(); break;
+        case Action::ImportMarkers: importButton.onClick(); break;
+        default:
+            if (action >= Action::Type1 && action <= Action::Type9)
+                handleTypeKey ((int) action - (int) Action::Type1);
+            else
+                return false;
+            break;
     }
-    else if (code == juce::KeyPress::escapeKey)
-    {
-        editingCycle = -1;
-        updateHint();
-        view.clearSelection();
-    }
-    else if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey)
-        deleteSelectedCycles();
-    else if (code == juce::KeyPress::homeKey)      { view.setCursor (0); view.ensureVisible (0); }
-    else if (code == juce::KeyPress::endKey)       { view.setCursor (audio->getNumSamples()); view.ensureVisible ((double) audio->getNumSamples()); }
-    else if (code == 'F')                          view.zoomToFit();
-    else if (code == 'Z')                          { if (view.hasSelection()) view.zoomToRange (view.getSelectionStart(), view.getSelectionEnd()); }
-    else if (code == 'L')                          { transport.setLooping (! transport.isLooping()); playback.setLooping (transport.isLooping()); }
-    else if (ch == '+' || ch == '=' || code == juce::KeyPress::numberPadAdd)
-        view.zoomAround (centrePx, 0.5);
-    else if (ch == '-' || code == juce::KeyPress::numberPadSubtract)
-        view.zoomAround (centrePx, 2.0);
-    else if (code == juce::KeyPress::leftKey)      view.scrollPixels (-view.getWidth() * 0.1);
-    else if (code == juce::KeyPress::rightKey)     view.scrollPixels (view.getWidth() * 0.1);
-    else
-        return false;
 
     return true;
 }
