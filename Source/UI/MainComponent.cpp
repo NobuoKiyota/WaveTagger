@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "Core/Exporter.h"
+#include "Core/Categories.h"
 #include "Core/Persistence.h"
 #include "Core/WavMarkers.h"
 #include "Theme.h"
@@ -20,7 +21,7 @@ MainComponent::MainComponent()
     formats.registerBasicFormats();
     setWantsKeyboardFocus (true);
 
-    for (auto* b : { &openButton, &audioButton, &importButton, &splitButton, &exportButton })
+    for (auto* b : { &openButton, &audioButton, &importButton, &splitButton, &exportButton, &libraryButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -29,6 +30,10 @@ MainComponent::MainComponent()
     autoPreviewToggle.setToggleState (true, juce::dontSendNotification);
     autoPreviewToggle.onClick = [this] { scheduleSave(); };
     addAndMakeVisible (autoPreviewToggle);
+    continueToggle.setWantsKeyboardFocus (false);
+    continueToggle.setToggleState (true, juce::dontSendNotification);
+    continueToggle.onClick = [this] { lastInfoKey = {}; refreshLibraryInfo(); scheduleSave(); };
+    addAndMakeVisible (continueToggle);
 
     openButton.onClick = [this] { showOpenDialog(); };
     audioButton.onClick = [this] { showAudioSettings(); };
@@ -42,6 +47,7 @@ MainComponent::MainComponent()
     };
     splitButton.onClick = [this] { if (audio != nullptr) showAutoSplitDialog(); };
     exportButton.onClick = [this] { if (audio != nullptr) startExport(); };
+    libraryButton.onClick = [this] { showLibrary(); };
 
     fileLabel.setColour (juce::Label::textColourId, theme::text);
     fileLabel.setFont (juce::FontOptions (14.0f));
@@ -133,6 +139,8 @@ MainComponent::MainComponent()
 
     view.addChangeListener (this);
     cycles.addChangeListener (this);
+    libraryIndex.addChangeListener (this);
+    refreshLibraryInfo();
     vblank = std::make_unique<juce::VBlankAttachment> (this, [this] { onVBlank(); });
 
     setSize (1400, 900);
@@ -144,6 +152,8 @@ MainComponent::~MainComponent()
     vblank = nullptr;
     view.removeChangeListener (this);
     cycles.removeChangeListener (this);
+    libraryIndex.removeChangeListener (this);
+    libraryWindow = nullptr;
     loader.removeAllJobs (true, 10000);
     spectrogram.onNewImage = nullptr;
     waveView.setCycleModel (nullptr);
@@ -153,12 +163,25 @@ MainComponent::~MainComponent()
 void MainComponent::loadSettings()
 {
     const auto s = readJson (getSettingsFile());
+
+    // Index roots: legacy library is read-only; the new library is where exports go.
+    juce::StringArray roots;
+    if (const auto* arr = s.getProperty ("libraryRoots", {}).getArray())
+        for (const auto& r : *arr)
+            roots.add (r.toString());
+    if (roots.isEmpty())
+        for (const char* def : { "G:\\SE", "G:\\SFX_Library" })
+            if (juce::File (def).isDirectory())
+                roots.add (def);
+    libraryIndex.setRoots (roots);
+
     if (! s.isObject())
         return;
 
     cycles.settingsFromVar (s.getProperty ("cycle", {}));
     exportDir = juce::File (s.getProperty ("exportDir", "").toString());
     autoPreviewToggle.setToggleState ((bool) s.getProperty ("autoPreview", true), juce::dontSendNotification);
+    continueToggle.setToggleState ((bool) s.getProperty ("continueNumbering", true), juce::dontSendNotification);
 }
 
 void MainComponent::scheduleSave()
@@ -180,6 +203,12 @@ void MainComponent::saveNow()
     settings->setProperty ("cycle", cycles.settingsToVar());
     settings->setProperty ("exportDir", exportDir.getFullPathName());
     settings->setProperty ("autoPreview", autoPreviewToggle.getToggleState());
+    settings->setProperty ("continueNumbering", continueToggle.getToggleState());
+
+    juce::Array<juce::var> rootArray;
+    for (const auto& r : libraryIndex.getRoots())
+        rootArray.add (r);
+    settings->setProperty ("libraryRoots", rootArray);
     writeJson (getSettingsFile(), juce::var (settings));
 
     if (audio != nullptr)
@@ -285,6 +314,15 @@ void MainComponent::runSnapshot (const juce::File& input, const juce::File& outp
 
 void MainComponent::takeSnapshot()
 {
+    // wait (up to 3 minutes) for a running library scan so the snapshot shows the finished index
+    if (libraryIndex.isScanning() && ++snapshotWaits < 360)
+    {
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::Timer::callAfterDelay (500, [safe] { if (safe != nullptr) safe->takeSnapshot(); });
+        return;
+    }
+
+    refreshLibraryInfo();
     const auto image = createComponentSnapshot (getLocalBounds());
     snapshotOutput.deleteFile();
     juce::FileOutputStream stream (snapshotOutput);
@@ -361,6 +399,11 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
     {
         scheduleSave();
         waveView.setSelectedCycles (list.getSelectedRows());
+        refreshLibraryInfo();
+    }
+    else if (source == &libraryIndex)
+    {
+        refreshLibraryInfo();
     }
     else
     {
@@ -536,7 +579,7 @@ void MainComponent::startExport()
         ExportItem item;
         item.start = c.start;
         item.end = c.end;
-        item.subFolder = folder;
+        item.subFolder = cycles.getCategory().isNotEmpty() ? cycles.getCategory() + "/" + folder : folder;
         item.fileName = cycles.nameOf (i);
         item.comment = "WaveTagger type=" + cycles.typeNameOf (c.type) + "; no=" + juce::String (cycles.numberOf (i))
                        + "; src=" + audio->file.getFileName();
@@ -567,9 +610,12 @@ void MainComponent::startExport()
 
                               juce::Component::SafePointer<MainComponent> safe (this);
                               auto data = audio;
-                              loader.addJob ([safe, data, items, untyped, root] {
+                              const auto dest = root.getChildFile (items.front().subFolder);
+                              loader.addJob ([safe, data, items, untyped, root, dest] {
                                   const auto result = exportCycles (*data, items, root);
-                                  juce::MessageManager::callAsync ([safe, result, untyped, root] {
+                                  juce::MessageManager::callAsync ([safe, result, untyped, root, dest] {
+                                      if (safe != nullptr && result.written > 0)
+                                          safe->afterExport (dest);
                                       juce::String msg = juce::String (result.written) + WT_U8 (" 件を書き出しました\n") + root.getFullPathName();
                                       if (untyped > 0)
                                           msg += "\n\n" + juce::String (untyped) + WT_U8 (" 件は未分類のためスキップしました");
@@ -579,10 +625,92 @@ void MainComponent::startExport()
                                       if (result.errors.size() > 0)
                                           msg += "\n\n" + juce::String (result.errors.size()) + WT_U8 (" 件は書き出しに失敗しました");
                                       juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Export", msg);
-                                      juce::ignoreUnused (safe);
                                   });
                               });
                           });
+}
+
+//==============================================================================
+void MainComponent::showLibrary()
+{
+    if (libraryWindow == nullptr)
+    {
+        libraryWindow = std::make_unique<LibraryWindow> (libraryIndex);
+        libraryWindow->getPanel().onRootsChanged = [this] (const juce::StringArray& roots) { setLibraryRoots (roots); };
+    }
+    libraryWindow->setVisible (true);
+    libraryWindow->toFront (true);
+}
+
+void MainComponent::setLibraryRoots (const juce::StringArray& roots)
+{
+    libraryIndex.setRoots (roots);
+    libraryIndex.rescan();
+    scheduleSave();
+}
+
+void MainComponent::afterExport (const juce::File& destFolder)
+{
+    auto roots = libraryIndex.getRoots();
+    bool covered = false;
+    for (const auto& r : roots)
+        covered = covered || destFolder.getFullPathName().startsWithIgnoreCase (r);
+
+    if (covered)
+    {
+        libraryIndex.refreshFolder (destFolder);
+    }
+    else
+    {
+        roots.add (destFolder.getParentDirectory().getFullPathName());
+        setLibraryRoots (roots);
+    }
+}
+
+void MainComponent::refreshLibraryInfo()
+{
+    const auto data = libraryIndex.getData();
+
+    std::array<juce::String, CycleModel::numSlots> stems;
+    juce::StringArray ownKeys;
+    juce::String key = juce::String (data->generation) + (continueToggle.getToggleState() ? "c" : "n");
+    for (int i = 0; i < CycleModel::numSlots; ++i)
+        if (cycles.isTypeUsable (i) && cycles.getNameStem (i, stems[(size_t) i]))
+        {
+            ownKeys.add (makeKey (stems[(size_t) i]));
+            key += "|" + stems[(size_t) i];
+        }
+
+    if (key == lastInfoKey)
+        return;
+    lastInfoKey = key;
+
+    std::array<int, CycleModel::numSlots> offsets {};
+    juce::StringArray summary, warnings;
+    for (int i = 0; i < CycleModel::numSlots; ++i)
+    {
+        const auto& stem = stems[(size_t) i];
+        if (stem.isEmpty())
+            continue;
+
+        const auto k = makeKey (stem);
+        if (const auto* b = data->find (k))
+        {
+            summary.add (cycles.getType (i).name + " " + juce::String (b->count));
+            if (continueToggle.getToggleState())
+                offsets[(size_t) i] = b->maxNumber;
+        }
+        else
+        {
+            const auto similar = data->findSimilar (k, ownKeys, 2);
+            if (similar.size() > 0)
+                warnings.add (stem.trimCharactersAtEnd ("_- ") + " ≈ " + similar.joinIntoString (", "));
+        }
+    }
+
+    cycles.setNumberOffsets (offsets);
+    palette.setLibraryInfo (summary.isEmpty() ? WT_U8 ("既存: なし") : WT_U8 ("既存: ") + summary.joinIntoString (" / "),
+                            warnings.isEmpty() ? juce::String() : WT_U8 ("⚠ 似た名前: ") + warnings.joinIntoString ("   "));
 }
 
 //==============================================================================
@@ -634,8 +762,11 @@ void MainComponent::resized()
     splitButton.setBounds (bar.removeFromLeft (84));
     bar.removeFromLeft (6);
     exportButton.setBounds (bar.removeFromLeft (84));
+    bar.removeFromLeft (6);
+    libraryButton.setBounds (bar.removeFromLeft (74));
     bar.removeFromLeft (14);
-    autoPreviewToggle.setBounds (bar.removeFromLeft (118));
+    autoPreviewToggle.setBounds (bar.removeFromLeft (112));
+    continueToggle.setBounds (bar.removeFromLeft (150));
     bar.removeFromLeft (8);
     floorSlider.setBounds (bar.removeFromRight (130));
     floorLabel.setBounds (bar.removeFromRight (70));
@@ -663,6 +794,12 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (mods.isCommandDown() && code == 'O')
     {
         showOpenDialog();
+        return true;
+    }
+
+    if (mods.isCommandDown() && code == 'L')
+    {
+        showLibrary();
         return true;
     }
 

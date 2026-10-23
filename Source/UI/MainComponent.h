@@ -2,9 +2,11 @@
 
 #include "Core/AutoSplit.h"
 #include "Core/CycleModel.h"
+#include "Core/LibraryIndex.h"
 #include "Core/PlaybackEngine.h"
 #include "Core/SpectrogramRenderer.h"
 #include "CycleList.h"
+#include "LibraryPanel.h"
 #include "OverviewBar.h"
 #include "PalettePanel.h"
 #include "TransportBar.h"
@@ -57,6 +59,10 @@ private:
     void runAutoSplit (const AutoSplitParams& params);
     int importMarkers();
     void startExport();
+    void showLibrary();
+    void refreshLibraryInfo();
+    void setLibraryRoots (const juce::StringArray& roots);
+    void afterExport (const juce::File& destFolder);
 
     // persistence
     void loadSettings();
@@ -68,11 +74,13 @@ private:
     SpectrogramRenderer spectrogram;
     PlaybackEngine playback;
     CycleModel cycles;
+    LibraryIndex libraryIndex;
+    std::unique_ptr<LibraryWindow> libraryWindow;
     AudioDataPtr audio;
 
     juce::TextButton openButton { "Open" }, audioButton { "Audio..." };
-    juce::TextButton importButton { "Import markers" }, splitButton { "Auto split" }, exportButton { "Export..." };
-    juce::ToggleButton autoPreviewToggle { "Auto preview" };
+    juce::TextButton importButton { "Import markers" }, splitButton { "Auto split" }, exportButton { "Export..." }, libraryButton { "Library" };
+    juce::ToggleButton autoPreviewToggle { "Auto preview" }, continueToggle { "Continue numbering" };
     juce::Label fileLabel, blendLabel, floorLabel;
     juce::Slider blendSlider, floorSlider;
     PalettePanel palette { cycles };
@@ -88,6 +96,8 @@ private:
     bool wasPlaying = false;
     juce::File snapshotOutput, exportDir;
     int saveGeneration = 0;
+    juce::String lastInfoKey;
+    int snapshotWaits = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

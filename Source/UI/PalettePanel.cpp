@@ -1,4 +1,5 @@
 #include "PalettePanel.h"
+#include "Core/Categories.h"
 #include "Theme.h"
 #include "Util/Text.h"
 
@@ -97,7 +98,31 @@ PalettePanel::PalettePanel (CycleModel& m)
     }
 
     exampleLabel.setColour (juce::Label::textColourId, theme::textDim);
-    addAndMakeVisible (exampleLabel);
+    summaryLabel.setColour (juce::Label::textColourId, theme::textDim);
+    warningLabel.setColour (juce::Label::textColourId, juce::Colour (0xffffc533));
+    for (auto* l : { &exampleLabel, &summaryLabel, &warningLabel })
+    {
+        l->setMinimumHorizontalScale (1.0f);
+        addAndMakeVisible (l);
+    }
+
+    categoryLabel.setText ("Category", juce::dontSendNotification);
+    categoryLabel.setColour (juce::Label::textColourId, theme::textDim);
+    categoryLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (categoryLabel);
+
+    categoryCombo.setWantsKeyboardFocus (false);
+    categoryCombo.addItem (WT_U8 ("(なし)"), 1);
+    for (const auto& c : getCategories())
+    {
+        categoryNames.push_back (c.name);
+        categoryCombo.addItem (c.name + (c.jp.isNotEmpty() ? "  " + c.jp : juce::String()), (int) categoryNames.size() + 1);
+    }
+    categoryCombo.onChange = [this] {
+        const auto id = categoryCombo.getSelectedId();
+        model.setCategory (id >= 2 ? categoryNames[(size_t) id - 2] : juce::String());
+    };
+    addAndMakeVisible (categoryCombo);
 
     for (auto* e : { &prefixEditor, &patternEditor })
     {
@@ -136,13 +161,24 @@ void PalettePanel::refresh()
     if (patternEditor.getText() != model.getPattern())
         patternEditor.setText (model.getPattern(), false);
 
+    const auto catIt = std::find (categoryNames.begin(), categoryNames.end(), model.getCategory());
+    categoryCombo.setSelectedId (catIt == categoryNames.end() ? 1 : (int) (catIt - categoryNames.begin()) + 2, juce::dontSendNotification);
+
     int firstUsable = 0;
     while (firstUsable < CycleModel::numSlots - 1 && ! model.isTypeUsable (firstUsable))
         ++firstUsable;
-    exampleLabel.setText (WT_U8 ("例: ") + model.nameFor (firstUsable, 1) + ".wav", juce::dontSendNotification);
+    exampleLabel.setText (WT_U8 ("例: ") + model.nameFor (firstUsable, 1 + model.getNumberOffset (firstUsable)) + ".wav",
+                          juce::dontSendNotification);
 
     for (auto* s : slots)
         s->refresh();
+}
+
+void PalettePanel::setLibraryInfo (const juce::String& summary, const juce::String& warning)
+{
+    summaryLabel.setText (summary, juce::dontSendNotification);
+    warningLabel.setText (warning, juce::dontSendNotification);
+    resized();
 }
 
 void PalettePanel::paint (juce::Graphics& g)
@@ -161,9 +197,19 @@ void PalettePanel::resized()
     prefixEditor.setBounds (top.removeFromLeft (110));
     top.removeFromLeft (10);
     patternLabel.setBounds (top.removeFromLeft (44));
-    patternEditor.setBounds (top.removeFromLeft (260));
-    top.removeFromLeft (14);
-    exampleLabel.setBounds (top);
+    patternEditor.setBounds (top.removeFromLeft (230));
+    top.removeFromLeft (10);
+    categoryLabel.setBounds (top.removeFromLeft (64));
+    categoryCombo.setBounds (top.removeFromLeft (190));
+    top.removeFromLeft (12);
+    const auto textWidth = [] (const juce::Label& l) {
+        juce::GlyphArrangement ga;
+        ga.addLineOfText (l.getFont(), l.getText(), 0.0f, 0.0f);
+        return (int) std::ceil (ga.getBoundingBox (0, -1, true).getWidth()) + 14;
+    };
+    exampleLabel.setBounds (top.removeFromLeft (juce::jmin (textWidth (exampleLabel), top.getWidth())));
+    summaryLabel.setBounds (top.removeFromLeft (juce::jmin (textWidth (summaryLabel), top.getWidth())));
+    warningLabel.setBounds (top);
 
     r.removeFromTop (6);
     const auto w = r.getWidth() / CycleModel::numSlots;

@@ -36,6 +36,15 @@ public:
     void setPrefix (const juce::String& p);
     void setPattern (const juce::String& p);
 
+    const juce::String& getCategory() const { return category; }
+    void setCategory (const juce::String& c);
+
+    /** Text of the file name before the number, e.g. "pen_push"; false if the pattern has no {num} or text after it. */
+    bool getNameStem (int type, juce::String& stem) const;
+    /** Highest number already used in the library per slot, so new files continue from there. */
+    void setNumberOffsets (const std::array<int, numSlots>& offsets);
+    int getNumberOffset (int slot) const { return slot >= 0 && slot < numSlots ? numberOffsets[(size_t) slot] : 0; }
+
     //== cycles
     int size() const { return (int) cycles.size(); }
     const Cycle& operator[] (int i) const { return cycles[(size_t) i]; }
@@ -50,7 +59,7 @@ public:
     int findAt (juce::int64 sample) const;
     bool overlapsAny (juce::int64 start, juce::int64 end) const;
 
-    /** 1-based number of this cycle among cycles of the same type, in time order. */
+    /** Number among cycles of the same type in time order (1-based), plus the library offset. */
     int numberOf (int index) const;
     int countOfType (int type) const;
     juce::String nameOf (int index) const;
@@ -78,6 +87,8 @@ private:
     std::array<MarkerType, numSlots> types;
     juce::String prefix { "pen" };
     juce::String pattern { "{prefix}_{type}{num:02}" };
+    juce::String category;
+    std::array<int, numSlots> numberOffsets {};
     std::vector<Cycle> cycles;
     std::vector<std::vector<Cycle>> undoStack, redoStack;
 };

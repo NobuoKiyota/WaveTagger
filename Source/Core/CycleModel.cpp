@@ -52,6 +52,38 @@ void CycleModel::setPattern (const juce::String& p)
     }
 }
 
+void CycleModel::setCategory (const juce::String& c)
+{
+    if (c != category)
+    {
+        category = c;
+        changed();
+    }
+}
+
+void CycleModel::setNumberOffsets (const std::array<int, numSlots>& offsets)
+{
+    if (offsets != numberOffsets)
+    {
+        numberOffsets = offsets;
+        changed();
+    }
+}
+
+bool CycleModel::getNameStem (int type, juce::String& stem) const
+{
+    const auto out = pattern.replace ("{prefix}", prefix).replace ("{type}", typeNameOf (type));
+    const auto i = out.indexOf ("{num");
+    if (i < 0)
+        return false;
+    const auto j = out.indexOfChar (i, '}');
+    if (j < 0 || j < out.length() - 1)
+        return false;
+
+    stem = sanitizeFileName (out.substring (0, i));
+    return stem.isNotEmpty();
+}
+
 //==============================================================================
 void CycleModel::pushUndo()
 {
@@ -186,7 +218,7 @@ int CycleModel::numberOf (int index) const
     for (int i = 0; i < index; ++i)
         if (cycles[(size_t) i].type == type)
             ++n;
-    return n;
+    return n + (type >= 0 && type < numSlots ? numberOffsets[(size_t) type] : 0);
 }
 
 int CycleModel::countOfType (int type) const
@@ -261,6 +293,7 @@ juce::var CycleModel::settingsToVar() const
     auto* o = new juce::DynamicObject();
     o->setProperty ("prefix", prefix);
     o->setProperty ("pattern", pattern);
+    o->setProperty ("category", category);
 
     juce::Array<juce::var> names;
     for (const auto& t : types)
@@ -276,6 +309,7 @@ void CycleModel::settingsFromVar (const juce::var& v)
 
     prefix = v.getProperty ("prefix", prefix).toString();
     pattern = v.getProperty ("pattern", pattern).toString();
+    category = v.getProperty ("category", category).toString();
     if (const auto* names = v.getProperty ("typeNames", {}).getArray())
         for (int i = 0; i < juce::jmin (numSlots, names->size()); ++i)
             types[(size_t) i].name = (*names)[i].toString();

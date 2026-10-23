@@ -20,6 +20,9 @@ public:
     /** Return / Escape pressed in one of the text fields: hand focus back to the main window. */
     std::function<void()> onEditingFinished;
 
+    /** Existing-count summary and similar-name warning coming from the library index. */
+    void setLibraryInfo (const juce::String& summary, const juce::String& warning);
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
@@ -30,8 +33,10 @@ private:
     void refresh();
 
     CycleModel& model;
-    juce::Label prefixLabel, patternLabel, exampleLabel;
+    juce::Label prefixLabel, patternLabel, categoryLabel, exampleLabel, summaryLabel, warningLabel;
     juce::TextEditor prefixEditor, patternEditor;
+    juce::ComboBox categoryCombo;
+    std::vector<juce::String> categoryNames;
     juce::OwnedArray<Slot> slots;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PalettePanel)
