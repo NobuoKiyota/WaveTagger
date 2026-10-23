@@ -15,6 +15,24 @@ WaveView::WaveView (ViewState& v, SpectrogramRenderer& s)
 WaveView::~WaveView()
 {
     view.removeChangeListener (this);
+    if (cycles != nullptr)
+        cycles->removeChangeListener (this);
+}
+
+void WaveView::setCycleModel (CycleModel* model)
+{
+    if (cycles != nullptr)
+        cycles->removeChangeListener (this);
+    cycles = model;
+    if (cycles != nullptr)
+        cycles->addChangeListener (this);
+    repaint();
+}
+
+void WaveView::setSelectedCycles (const juce::Array<int>& rows)
+{
+    selectedCycles = rows;
+    repaint();
 }
 
 void WaveView::setAudio (AudioDataPtr newAudio)
@@ -87,9 +105,10 @@ void WaveView::resized()
     requestSpectrogram();
 }
 
-void WaveView::changeListenerCallback (juce::ChangeBroadcaster*)
+void WaveView::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
-    requestSpectrogram();
+    if (source == &view)
+        requestSpectrogram();
     repaint();
 }
 
@@ -229,6 +248,8 @@ void WaveView::drawWaveform (juce::Graphics& g, int channel, juce::Rectangle<int
 void WaveView::drawOverlays (juce::Graphics& g)
 {
     const auto area = getLanesArea();
+    drawCycles (g);
+
     juce::Graphics::ScopedSaveState save (g);
     g.reduceClipRegion (area);
 
@@ -253,6 +274,64 @@ void WaveView::drawOverlays (juce::Graphics& g)
         g.setColour (theme::playhead);
         g.fillRect (juce::Rectangle<float> (sampleToX ((double) playhead) - 0.75f, (float) area.getY(), 1.5f, (float) area.getHeight()));
     }
+}
+
+void WaveView::drawCycles (juce::Graphics& g)
+{
+    if (cycles == nullptr)
+        return;
+
+    const auto area = getLanesArea();
+    juce::Graphics::ScopedSaveState save (g);
+    g.reduceClipRegion (area);
+    g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+
+    const auto v0 = view.getViewStart(), v1 = view.getViewEnd();
+    for (int i = 0; i < cycles->size(); ++i)
+    {
+        const auto& c = (*cycles)[i];
+        if ((double) c.end < v0 || (double) c.start > v1)
+            continue;
+
+        const auto selected = selectedCycles.contains (i);
+        const auto colour = c.type >= 0 ? cycles->getType (c.type).colour : juce::Colours::grey;
+        const auto x1 = sampleToX ((double) c.start);
+        const auto x2 = sampleToX ((double) c.end);
+        const juce::Rectangle<float> r (x1, (float) area.getY(), juce::jmax (1.0f, x2 - x1), (float) area.getHeight());
+
+        g.setColour (colour.withAlpha (selected ? 0.30f : 0.13f));
+        g.fillRect (r);
+        g.setColour (colour.withAlpha (selected ? 1.0f : 0.7f));
+        g.drawRect (r, selected ? 2.0f : 1.0f);
+
+        const auto tag = r.withHeight (16.0f);
+        g.setColour (colour.withAlpha (selected ? 1.0f : 0.8f));
+        g.fillRect (tag);
+        if (tag.getWidth() > 28.0f)
+        {
+            g.setColour (colour.getBrightness() > 0.6f ? juce::Colours::black : juce::Colours::white);
+            g.drawText (cycles->nameOf (i), tag.reduced (3.0f, 0.0f), juce::Justification::centredLeft, true);
+        }
+    }
+}
+
+void WaveView::showCycleMenu (int cycleIndex)
+{
+    juce::PopupMenu menu;
+    menu.addSectionHeader (cycles->nameOf (cycleIndex));
+    menu.addItem (99, WT_U8 ("— (未分類)"), true, (*cycles)[cycleIndex].type < 0);
+    for (int i = 0; i < CycleModel::numSlots; ++i)
+        if (cycles->isTypeUsable (i))
+            menu.addItem (100 + i, juce::String (i + 1) + "  " + cycles->getType (i).name, true, (*cycles)[cycleIndex].type == i);
+    menu.addSeparator();
+    menu.addItem (1, WT_U8 ("削除"));
+
+    juce::Component::SafePointer<WaveView> safe (this);
+    menu.showMenuAsync ({}, [safe, cycleIndex] (int result) {
+        if (safe == nullptr || result == 0 || ! safe->onCycleMenuChoice)
+            return;
+        safe->onCycleMenuChoice (cycleIndex, result == 1 ? -2 : result == 99 ? -1 : result - 100);
+    });
 }
 
 void WaveView::drawFrequencyAxis (juce::Graphics& g, juce::Rectangle<int> lane)
@@ -359,6 +438,14 @@ void WaveView::mouseDown (const juce::MouseEvent& e)
     const auto s = xToSample (e.position.x);
     lastMouseX = e.position.x;
 
+    if (e.mods.isPopupMenu())
+    {
+        const auto idx = cycles != nullptr ? cycles->findAt (s) : -1;
+        if (idx >= 0)
+            showCycleMenu (idx);
+        return;
+    }
+
     if (e.mods.isShiftDown())
     {
         if (view.hasSelection())
@@ -401,7 +488,7 @@ void WaveView::mouseDrag (const juce::MouseEvent& e)
 void WaveView::mouseUp (const juce::MouseEvent& e)
 {
     stopTimer();
-    if (audio == nullptr)
+    if (audio == nullptr || e.mods.isPopupMenu())
         return;
 
     if (! dragging)
@@ -411,6 +498,10 @@ void WaveView::mouseUp (const juce::MouseEvent& e)
         view.setCursor (s);
         if (onCursorClicked)
             onCursorClicked (s);
+
+        const auto idx = cycles != nullptr ? cycles->findAt (s) : -1;
+        if (idx >= 0 && onCycleClicked)
+            onCycleClicked (idx);
     }
     else if (view.hasSelection())
     {

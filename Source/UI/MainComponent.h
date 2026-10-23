@@ -1,8 +1,12 @@
 #pragma once
 
+#include "Core/AutoSplit.h"
+#include "Core/CycleModel.h"
 #include "Core/PlaybackEngine.h"
 #include "Core/SpectrogramRenderer.h"
+#include "CycleList.h"
 #include "OverviewBar.h"
+#include "PalettePanel.h"
 #include "TransportBar.h"
 #include "WaveView.h"
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -19,7 +23,7 @@ public:
 
     void openFile (const juce::File& file);
 
-    /** Loads a file, renders, writes a PNG of the whole window and quits (for automated visual checks). */
+    /** Loads a file, auto-splits it into demo cycles, writes a PNG of the window and quits (for automated visual checks). */
     void runSnapshot (const juce::File& input, const juce::File& output);
 
     std::function<void (const juce::String&)> onTitleChanged;
@@ -43,17 +47,38 @@ private:
     void showAudioSettings();
     void takeSnapshot();
 
+    // cycles
+    void handleTypeKey (int slot);
+    void addCycleFromSelection (int slot);
+    void previewCycle (int index);
+    void deleteSelectedCycles();
+    void applyType (const juce::Array<int>& rows, int type);
+    void showAutoSplitDialog();
+    void runAutoSplit (const AutoSplitParams& params);
+    int importMarkers();
+    void startExport();
+
+    // persistence
+    void loadSettings();
+    void scheduleSave();
+    void saveNow();
+
     juce::AudioFormatManager formats;
     ViewState view;
     SpectrogramRenderer spectrogram;
     PlaybackEngine playback;
+    CycleModel cycles;
     AudioDataPtr audio;
 
     juce::TextButton openButton { "Open" }, audioButton { "Audio..." };
+    juce::TextButton importButton { "Import markers" }, splitButton { "Auto split" }, exportButton { "Export..." };
+    juce::ToggleButton autoPreviewToggle { "Auto preview" };
     juce::Label fileLabel, blendLabel, floorLabel;
     juce::Slider blendSlider, floorSlider;
+    PalettePanel palette { cycles };
     OverviewBar overview { view };
     WaveView waveView { view, spectrogram };
+    CycleList list { cycles };
     TransportBar transport;
 
     juce::ThreadPool loader { juce::ThreadPoolOptions {}.withNumberOfThreads (1) };
@@ -61,7 +86,8 @@ private:
     std::unique_ptr<juce::VBlankAttachment> vblank;
     juce::String statusText;
     bool wasPlaying = false;
-    juce::File snapshotOutput;
+    juce::File snapshotOutput, exportDir;
+    int saveGeneration = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

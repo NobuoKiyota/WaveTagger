@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/CycleModel.h"
 #include "Core/SpectrogramRenderer.h"
 #include "ViewState.h"
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -26,8 +27,14 @@ public:
     void setBlend (float newBlend);
     void setFloorDb (float db);
 
+    void setCycleModel (CycleModel* model);
+    void setSelectedCycles (const juce::Array<int>& rows);
+
     /** Called when the user clicks (without dragging) to move the cursor. */
     std::function<void (juce::int64)> onCursorClicked;
+    std::function<void (int cycleIndex)> onCycleClicked;
+    /** type: 0..8 slot, -1 untyped, -2 delete. */
+    std::function<void (int cycleIndex, int type)> onCycleMenuChoice;
 
     juce::Rectangle<int> getLanesArea() const;
 
@@ -42,6 +49,8 @@ public:
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
+    void drawCycles (juce::Graphics& g);
+    void showCycleMenu (int cycleIndex);
 
     void requestSpectrogram();
     juce::Rectangle<int> getLaneBounds (int channel) const;
@@ -61,6 +70,8 @@ private:
     juce::int64 playhead = -1;
     float blend = 0.5f;
     float floorDb = -110.0f;
+    CycleModel* cycles = nullptr;
+    juce::Array<int> selectedCycles;
 
     bool dragging = false;
     juce::int64 dragAnchor = 0;
