@@ -197,6 +197,7 @@ private:
         {
             ConditioningPanel::Hooks hooks;
             hooks.humStatus = [] { return WT_U8 ("60 Hz  (倍音 4 本を除去)"); };
+            hooks.panStatus = [] { return WT_U8 ("L が R より 1.8 dB 大きい → ±0.9 dB ずつ補正"); };
             hooks.selectionInfo = [] { return WT_U8 ("選択: ピーク -12.3 -> -1.0 dBFS  (+11.3 dB)"); };
             ConditionSettings demo;
             demo.preset = ConditionPreset::standard;
@@ -1980,6 +1981,94 @@ private:
             check (detectHum (busy, sr, o).mainsHz == 60.0, "hum is found from the quiet start of a mostly noisy recording");
         }
 
+        // ---- left / right balance
+        {
+            const double sr = 48000.0;
+            // eight 0.3 s noise bursts over a quiet floor; the bursts have the given gains per channel
+            const auto events = [&] (double gainLeft, double gainRight, double floorLeft, double floorRight, bool moving, double rumbleLeft) {
+                juce::AudioBuffer<float> b (2, (int) (sr * 8.0));
+                juce::Random rnd (61);
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                {
+                    const auto t = i / sr;
+                    const auto inBurst = std::fmod (t, 1.0) >= 0.2 && std::fmod (t, 1.0) < 0.5;
+                    const auto k = (int) t;
+                    const auto sweep = moving ? (k - 3.5) * 1.7 : 0.0; // dB, left minus right, changing from burst to burst
+                    const auto gl = gainLeft * std::pow (10.0, sweep / 40.0), gr = gainRight * std::pow (10.0, -sweep / 40.0);
+                    double l = (rnd.nextFloat() - 0.5) * 2.0 * floorLeft, r = (rnd.nextFloat() - 0.5) * 2.0 * floorRight;
+                    if (inBurst)
+                    {
+                        l += (rnd.nextFloat() - 0.5) * 0.6 * gl;
+                        r += (rnd.nextFloat() - 0.5) * 0.6 * gr;
+                    }
+                    l += rumbleLeft * std::sin (2.0 * pi * 25.0 * t);
+                    b.setSample (0, i, (float) l);
+                    b.setSample (1, i, (float) r);
+                }
+                return b;
+            };
+            const auto channelDb = [&] (const juce::AudioBuffer<float>& b, int ch) {
+                double sum = 0.0;
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                    sum += (double) b.getSample (ch, i) * b.getSample (ch, i);
+                return 10.0 * std::log10 (sum / b.getNumSamples());
+            };
+
+            ConditionOptions o;
+            o.panMode = PanMode::automatic;
+
+            const auto quietRight = 1.0 / std::pow (10.0, 3.1 / 20.0);
+            auto lopsided = events (1.0, quietRight, 0.002, 0.002, false, 0.0);
+            const auto found = detectPanBalance (lopsided, sr, o);
+            check (found.outcome == PanOutcome::applied && std::abs (found.differenceDb - 3.1) < 0.25, "a steady 3 dB difference is measured (left louder)");
+
+            const auto before = lopsided;
+            conditionFile (lopsided, sr, o, rep);
+            check (rep.panApplied && std::abs (rep.panDb - found.differenceDb) < 1.0e-9
+                       && std::abs ((channelDb (lopsided, 0) - channelDb (before, 0)) - (-0.5 * found.differenceDb)) < 0.05
+                       && std::abs ((channelDb (lopsided, 1) - channelDb (before, 1)) - (0.5 * found.differenceDb)) < 0.05,
+                   "each channel moves half of it towards the other (the overall level stays)");
+            const auto after = detectPanBalance (lopsided, sr, o);
+            check (after.outcome == PanOutcome::balanced && std::abs (after.differenceDb) < 0.25, "afterwards the two sides match");
+
+            // a steady sound (no floor between events) is judged over everything that is loud enough
+            juce::AudioBuffer<float> rain (2, (int) (sr * 5.0));
+            juce::Random rainRnd (81);
+            for (int i = 0; i < rain.getNumSamples(); ++i)
+            {
+                rain.setSample (0, i, (rainRnd.nextFloat() - 0.5f) * 0.2f);
+                rain.setSample (1, i, (rainRnd.nextFloat() - 0.5f) * 0.2f * (float) quietRight);
+            }
+            const auto steady = detectPanBalance (rain, sr, o);
+            check (steady.outcome == PanOutcome::applied && std::abs (steady.differenceDb - 3.1) < 0.25, "a steady sound such as rain is judged too");
+
+            const auto rightLouder = detectPanBalance (events (quietRight, 1.0, 0.002, 0.002, false, 0.0), sr, o);
+            check (rightLouder.outcome == PanOutcome::applied && rightLouder.differenceDb < -2.8, "it works the other way round too");
+
+            const auto leaves = [&] (juce::AudioBuffer<float> b, PanOutcome expected, const char* what) {
+                const auto copy = b;
+                conditionFile (b, sr, o, rep);
+                check (detectPanBalance (copy, sr, o).outcome == expected && ! rep.panApplied && identical (b, copy), what);
+            };
+            leaves (events (1.0, 1.0 / std::pow (10.0, 0.2 / 20.0), 0.002, 0.002, false, 0.0), PanOutcome::balanced, "a difference under 0.5 dB is left alone (bit-exact)");
+            leaves (events (1.0, 1.0, 0.002, 0.002, true, 0.0), PanOutcome::imageMoves, "a stereo image that moves during the recording is left alone");
+            leaves (events (1.0, 0.25, 0.002, 0.002, false, 0.0), PanOutcome::tooLarge, "a 12 dB difference is taken for an intended pan or a bad channel and left alone");
+            leaves (events (1.0, 1.0, 0.02, 0.005, false, 0.0), PanOutcome::balanced, "a lopsided noise floor does not count: only the sound is compared");
+            leaves (events (1.0, 1.0, 0.002, 0.002, false, 0.3), PanOutcome::balanced, "low-frequency rumble on one side does not count");
+
+            juce::AudioBuffer<float> mono (1, (int) (sr * 3));
+            mono.clear();
+            leaves (mono, PanOutcome::notStereo, "mono is not touched");
+            juce::AudioBuffer<float> silent (2, (int) (sr * 5));
+            silent.clear();
+            leaves (silent, PanOutcome::tooShort, "silence cannot be judged and is left alone");
+            juce::AudioBuffer<float> blip (2, 4800);
+            blip.clear();
+            leaves (blip, PanOutcome::tooShort, "a very short recording is left alone");
+
+            check (presetOptions (ConditionPreset::standard).panMode == PanMode::automatic, "the standard preset includes the balance correction");
+        }
+
         // ---- Peak / ceiling / max gain
         {
             ConditionOptions o;
@@ -2069,6 +2158,7 @@ private:
             s.preset = ConditionPreset::custom;
             s.options.dcRemove = true;
             s.options.humMode = HumMode::mains60;
+            s.options.panMode = PanMode::automatic;
             s.options.lowCutHz = 35.0f;
             s.options.lowCutOrder = 4;
             s.options.normalize = NormalizeMode::lufs;
@@ -2084,13 +2174,14 @@ private:
             auto* wild = new juce::DynamicObject();
             wild->setProperty ("preset", "bogus");
             wild->setProperty ("hum", "bogus");
+            wild->setProperty ("pan", "bogus");
             wild->setProperty ("lowCutHz", 99999.0);
             wild->setProperty ("lowCutOrder", 7);
             wild->setProperty ("normalize", "peak");
             wild->setProperty ("targetDb", 55.0);
             wild->setProperty ("ceilingDb", -100.0);
             const auto clamped = conditionSettingsFromVar (juce::var (wild));
-            check (clamped.options.humMode == HumMode::off && clamped.options.lowCutHz == 500.0f && clamped.options.lowCutOrder == 4
+            check (clamped.options.humMode == HumMode::off && clamped.options.panMode == PanMode::off && clamped.options.lowCutHz == 500.0f && clamped.options.lowCutOrder == 4
                        && clamped.options.targetDb == 0.0 && clamped.options.ceilingDb == -24.0 && clamped.preset == ConditionPreset::custom,
                    "unknown names fall back to off, numbers are clamped to sensible ranges");
 
@@ -2163,9 +2254,11 @@ private:
             ConditionOptions o;
             o.dcRemove = true;
             o.humMode = HumMode::automatic;
+            o.panMode = PanMode::automatic;
             preview.setOptions (o);
             check (pump ([&] { return preview.humReady(); }, 10000) && preview.getHum().mainsHz == 60.0, "the hum in the recording is looked for in the background");
             check (preview.getProcessed() == nullptr && ! preview.isBuilding(), "no copy is made until one is asked for");
+            check (pump ([&] { return preview.panReady(); }, 10000) && preview.getPan().outcome == PanOutcome::balanced, "the left/right balance is measured in the background too");
 
             preview.requestProcessed();
             check (pump ([&] { return preview.getProcessed() != nullptr; }, 15000), "the conditioned copy arrives");
@@ -2240,6 +2333,7 @@ private:
                 for (int t = 0; t < 10000 && main.testHumStatus().contains ("..."); t += 50)
                     juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
                 check (main.testHumStatus().contains ("60 Hz"), "the panel can say which hum was found");
+                check (main.testPanStatus().contains (WT_U8 ("ステレオではない")), "and what it makes of the balance (this one is mono)");
                 check (main.testSummary().contains ("Peak -1.0 dBFS"), "the export dialog's summary names what will be applied");
                 main.testSaveNow();
             }
@@ -2328,6 +2422,37 @@ private:
                 const std::string hbytes ((const char*) hraw.getData(), hraw.getSize());
                 check (hr1.humHz == 60.0 && hr1.humNotches >= 3 && hbytes.find ("cond=hum60Hz/") != std::string::npos,
                        "the exporter reports the hum it removed and writes it into the comment");
+            }
+
+            {
+                AudioData panData;
+                panData.sampleRate = 48000.0;
+                panData.bitsPerSample = 24;
+                panData.buffer.setSize (2, 48000 * 8);
+                juce::Random pr (71);
+                for (int i = 0; i < panData.buffer.getNumSamples(); ++i)
+                {
+                    const auto burst = std::fmod (i / 48000.0, 1.0) >= 0.2 && std::fmod (i / 48000.0, 1.0) < 0.5;
+                    panData.buffer.setSample (0, i, (float) ((pr.nextFloat() - 0.5) * (burst ? 0.4 : 0.004)));
+                    panData.buffer.setSample (1, i, (float) ((pr.nextFloat() - 0.5) * (burst ? 0.28 : 0.004)));
+                }
+
+                ConditionOptions po;
+                po.panMode = PanMode::automatic;
+                const auto pres = exportCycles (panData, { { 0, 8 * 48000, "Pan", "pan", "" } }, base, 24, 2.0f, po);
+                int pbits = 0;
+                const auto pf = load (base.getChildFile ("Pan/pan.wav"), pbits);
+                const auto channelEnergy = [&] (int ch) {
+                    double sum = 0.0;
+                    for (int i = 0; i < pf.getNumSamples(); ++i)
+                        sum += (double) pf.getSample (ch, i) * pf.getSample (ch, i);
+                    return 10.0 * std::log10 (sum);
+                };
+                juce::MemoryBlock praw;
+                base.getChildFile ("Pan/pan.wav").loadFileAsData (praw);
+                const std::string pbytes ((const char*) praw.getData(), praw.getSize());
+                check (pres.panApplied && pres.panDb > 2.5 && std::abs (channelEnergy (0) - channelEnergy (1)) < 0.3 && pbytes.find ("cond=pan+") != std::string::npos,
+                       "the exporter balances the two sides and says so in the result and in the comment");
             }
 
             const auto again = exportCycles (data, items2, base, 24, 2.0f, o);

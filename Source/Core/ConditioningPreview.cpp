@@ -23,6 +23,7 @@ void ConditioningPreview::setAudio (AudioDataPtr newAudio)
     processedWanted = false;
     fileReport = {};
     hum = {};
+    pan = {};
     building = false;
     ++shared->generation;
     startSoon();
@@ -37,6 +38,7 @@ void ConditioningPreview::setOptions (const ConditionOptions& newOptions)
     processed = nullptr;
     fileReport = {};
     hum = {};
+    pan = {};
     ++shared->generation;
     startSoon();
 }
@@ -94,8 +96,9 @@ void ConditioningPreview::start()
     const auto buildCopy = wantProcessed && opts.needsFile();
     building = buildCopy;
     hum.ready = opts.humMode == HumMode::off;
+    pan.ready = opts.panMode == PanMode::off;
 
-    if (! buildCopy && opts.humMode == HumMode::off)
+    if (! buildCopy && opts.humMode == HumMode::off && opts.panMode == PanMode::off)
     {
         if (onChanged)
             onChanged();
@@ -109,6 +112,9 @@ void ConditioningPreview::start()
         HumDetection found;
         if (opts.humMode != HumMode::off)
             found = detectHum (audio->buffer, audio->sampleRate, opts);
+        PanDetection balance;
+        if (opts.panMode != PanMode::off)
+            balance = detectPanBalance (audio->buffer, audio->sampleRate, opts);
 
         AudioDataPtr result;
         ConditionReport report;
@@ -125,17 +131,19 @@ void ConditioningPreview::start()
             result = std::move (copy);
         }
 
-        juce::MessageManager::callAsync ([this, token, generation, buildCopy, found = std::move (found), result = std::move (result), report]() mutable {
+        juce::MessageManager::callAsync ([this, token, generation, buildCopy, found = std::move (found), balance, result = std::move (result), report]() mutable {
             if (token->alive && token->generation == generation)
-                finish (generation, buildCopy, std::move (found), std::move (result), report);
+                finish (generation, buildCopy, std::move (found), balance, std::move (result), report);
         });
     });
 }
 
-void ConditioningPreview::finish (int, bool wantedProcessed, HumDetection foundHum, AudioDataPtr result, ConditionReport report)
+void ConditioningPreview::finish (int, bool wantedProcessed, HumDetection foundHum, PanDetection foundPan, AudioDataPtr result, ConditionReport report)
 {
     hum.ready = true;
     hum.result = std::move (foundHum);
+    pan.ready = true;
+    pan.result = foundPan;
     if (wantedProcessed)
     {
         processed = std::move (result);

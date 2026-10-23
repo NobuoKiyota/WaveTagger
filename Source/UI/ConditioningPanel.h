@@ -14,6 +14,7 @@ public:
     {
         std::function<void (const ConditionSettings&)> changed;
         std::function<juce::String()> humStatus;     // e.g. "60 Hz (4 harmonics)" / "none" / "looking..."
+        std::function<juce::String()> panStatus;     // what the left/right balance of this recording is and what is done about it
         std::function<juce::String()> selectionInfo; // gain for the cycle that is selected
     };
 
@@ -22,7 +23,7 @@ public:
     void setSettings (const ConditionSettings& s);
     const ConditionSettings& getSettings() const { return settings; }
 
-    /** Refreshes the two readouts. */
+    /** Refreshes the readouts. */
     void updateReadouts();
 
     void paint (juce::Graphics& g) override;
@@ -37,8 +38,8 @@ private:
     Hooks hooks;
     bool updating = false;
 
-    juce::Label presetLabel, humLabel, cutLabel, cutHzLabel, normLabel, targetLabel, ceilingLabel, humStatusLabel, selectionLabel, noteLabel;
-    juce::ComboBox presetBox, humBox, cutOrderBox, normBox;
+    juce::Label presetLabel, humLabel, panLabel, panStatusLabel, cutLabel, cutHzLabel, normLabel, targetLabel, ceilingLabel, humStatusLabel, selectionLabel, noteLabel;
+    juce::ComboBox presetBox, humBox, panBox, cutOrderBox, normBox;
     juce::ToggleButton dcToggle, cutToggle, ditherToggle, gainToggle;
     juce::TextEditor cutHz, target, ceiling;
 

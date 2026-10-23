@@ -34,6 +34,10 @@ public:
     bool humReady() const { return hum.ready; }
     const HumDetection& getHum() const { return hum.result; }
 
+    /** The left/right balance of the recording (needs panMode != off). */
+    bool panReady() const { return pan.ready; }
+    const PanDetection& getPan() const { return pan.result; }
+
     std::function<void()> onChanged; // after anything above changed
 
 private:
@@ -45,7 +49,7 @@ private:
 
     void startSoon();
     void start();
-    void finish (int generation, bool wantedProcessed, HumDetection foundHum, AudioDataPtr result, ConditionReport report);
+    void finish (int generation, bool wantedProcessed, HumDetection foundHum, PanDetection foundPan, AudioDataPtr result, ConditionReport report);
 
     std::shared_ptr<Shared> shared = std::make_shared<Shared>();
     AudioDataPtr original, processed;
@@ -57,6 +61,11 @@ private:
         bool ready = false;
         HumDetection result;
     } hum;
+    struct
+    {
+        bool ready = false;
+        PanDetection result;
+    } pan;
 
     juce::ThreadPool pool { juce::ThreadPoolOptions {}.withNumberOfThreads (1) };
 

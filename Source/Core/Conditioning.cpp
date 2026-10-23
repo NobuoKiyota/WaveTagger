@@ -343,6 +343,90 @@ HumDetection detectHum (const juce::AudioBuffer<float>& buffer, double sampleRat
     return result;
 }
 
+PanDetection detectPanBalance (const juce::AudioBuffer<float>& buffer, double sampleRate, const ConditionOptions& options)
+{
+    PanDetection result;
+    if (buffer.getNumChannels() != 2)
+    {
+        result.outcome = PanOutcome::notStereo;
+        return result;
+    }
+
+    const auto frameLength = juce::jmax (1, (int) (0.05 * sampleRate));
+    const auto frames = buffer.getNumSamples() / frameLength;
+    if (frames < 10)
+        return result;
+
+    // energy per frame and channel, above 100 Hz
+    std::vector<double> energy[2];
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        energy[ch].assign ((size_t) frames, 0.0);
+        auto filter = Biquad::highPass (sampleRate, 100.0, 0.7071067811865476);
+        const auto* d = buffer.getReadPointer (ch);
+        for (int f = 0; f < frames; ++f)
+        {
+            double sum = 0.0;
+            for (int i = 0; i < frameLength; ++i)
+            {
+                const auto y = filter.process ((double) d[f * frameLength + i]);
+                sum += y * y;
+            }
+            energy[ch][(size_t) f] = sum;
+        }
+    }
+
+    std::vector<double> totals ((size_t) frames);
+    for (int f = 0; f < frames; ++f)
+        totals[(size_t) f] = energy[0][(size_t) f] + energy[1][(size_t) f];
+
+    auto sorted = totals;
+    std::nth_element (sorted.begin(), sorted.begin() + (std::ptrdiff_t) (frames / 10), sorted.end());
+    const auto floor = sorted[(size_t) (frames / 10)];
+    std::nth_element (sorted.begin(), sorted.begin() + (std::ptrdiff_t) (frames * 9 / 10), sorted.end());
+    const auto top = sorted[(size_t) (frames * 9 / 10)];
+
+    // Sounds with a floor between them: only the frames 12 dB over the floor count. A steady sound (rain, a machine) has no
+    // such frames; there everything above -60 dBFS counts instead.
+    const auto dynamic = top > floor * 16.0;
+    const auto threshold = dynamic ? juce::jmax (floor * 16.0, 2.0 * frameLength * 1.0e-8) : 2.0 * frameLength * 1.0e-6;
+
+    std::vector<double> perFrame;
+    double sumLeft = 0.0, sumRight = 0.0;
+    for (int f = 0; f < frames; ++f)
+    {
+        if (totals[(size_t) f] <= threshold)
+            continue;
+
+        sumLeft += energy[0][(size_t) f];
+        sumRight += energy[1][(size_t) f];
+        perFrame.push_back (10.0 * std::log10 ((energy[0][(size_t) f] + 1.0e-18) / (energy[1][(size_t) f] + 1.0e-18)));
+    }
+
+    result.activeFrames = (int) perFrame.size();
+    if (perFrame.size() < 3 || sumLeft <= 0.0 || sumRight <= 0.0)
+        return result;
+
+    result.differenceDb = 10.0 * std::log10 (sumLeft / sumRight);
+
+    const auto percentile = [&] (double p) {
+        const auto k = (size_t) std::lround (p * (double) (perFrame.size() - 1));
+        std::nth_element (perFrame.begin(), perFrame.begin() + (std::ptrdiff_t) k, perFrame.end());
+        return perFrame[k];
+    };
+    result.spreadDb = percentile (0.75) - percentile (0.25);
+
+    if (result.spreadDb > options.panSpreadDb)
+        result.outcome = PanOutcome::imageMoves;
+    else if (std::abs (result.differenceDb) > options.panMaxDb)
+        result.outcome = PanOutcome::tooLarge;
+    else if (std::abs (result.differenceDb) < options.panThresholdDb)
+        result.outcome = PanOutcome::balanced;
+    else
+        result.outcome = PanOutcome::applied;
+    return result;
+}
+
 float samplePeak (const juce::AudioBuffer<float>& buffer)
 {
     float peak = 0.0f;
@@ -425,6 +509,19 @@ void conditionFile (juce::AudioBuffer<float>& buffer, double sampleRate, const C
 
     if (options.lowCutHz > 0.0f)
         lowCut (buffer, sampleRate, options.lowCutHz, options.lowCutOrder);
+
+    if (options.panMode != PanMode::off)
+    {
+        const auto pan = detectPanBalance (buffer, sampleRate, options);
+        if (pan.outcome == PanOutcome::applied)
+        {
+            // each channel moves half of the difference towards the other: the overall level stays, the peak grows the least
+            buffer.applyGain (0, 0, buffer.getNumSamples(), (float) std::pow (10.0, -pan.differenceDb / 40.0));
+            buffer.applyGain (1, 0, buffer.getNumSamples(), (float) std::pow (10.0, pan.differenceDb / 40.0));
+            report.panApplied = true;
+            report.panDb = pan.differenceDb;
+        }
+    }
 }
 
 void conditionCycle (juce::AudioBuffer<float>& buffer, double sampleRate, const ConditionOptions& options, ConditionReport& report)
@@ -499,6 +596,7 @@ ConditionOptions presetOptions (ConditionPreset preset)
         o.humMode = HumMode::automatic;
         o.lowCutHz = 20.0f;
         o.lowCutOrder = 2;
+        o.panMode = PanMode::automatic;
         o.normalize = NormalizeMode::peak;
         o.targetDb = -1.0;
     }
@@ -509,6 +607,7 @@ namespace
 {
 const char* const presetNames[] = { "off", "standard", "custom" };
 const char* const humNames[] = { "off", "auto", "50", "60" };
+const char* const panNames[] = { "off", "auto" };
 const char* const normalizeNames[] = { "off", "peak", "lufs" };
 
 template <typename Enum, size_t N>
@@ -528,6 +627,7 @@ juce::var conditionSettingsToVar (const ConditionSettings& s)
     o->setProperty ("preset", presetNames[(int) s.preset]);
     o->setProperty ("dcRemove", s.options.dcRemove);
     o->setProperty ("hum", humNames[(int) s.options.humMode]);
+    o->setProperty ("pan", panNames[(int) s.options.panMode]);
     o->setProperty ("lowCutHz", (double) s.options.lowCutHz);
     o->setProperty ("lowCutOrder", s.options.lowCutOrder);
     o->setProperty ("normalize", normalizeNames[(int) s.options.normalize]);
@@ -548,6 +648,7 @@ ConditionSettings conditionSettingsFromVar (const juce::var& v)
     auto& o = s.options;
     o.dcRemove = (bool) v.getProperty ("dcRemove", false);
     o.humMode = enumFrom (v.getProperty ("hum", {}), humNames, HumMode::off);
+    o.panMode = enumFrom (v.getProperty ("pan", {}), panNames, PanMode::off);
 
     const auto cut = (double) v.getProperty ("lowCutHz", 0.0);
     o.lowCutHz = cut >= 1.0 ? (float) juce::jlimit (10.0, 500.0, cut) : 0.0f;
@@ -602,6 +703,9 @@ juce::String describeConditioning (const ConditionOptions& options, const Condit
         parts.add (report.humHz > 0.0 ? "hum" + juce::String (report.humHz, 0) + "Hz/" + juce::String (report.humNotches) : juce::String ("hum=none"));
     if (options.lowCutHz > 0.0f)
         parts.add ("lc" + juce::String (options.lowCutHz, 0) + "Hz/" + juce::String (options.lowCutOrder >= 4 ? 4 : 2));
+
+    if (options.panMode != PanMode::off)
+        parts.add (report.panApplied ? "pan" + juce::String (report.panDb >= 0 ? "+" : "") + juce::String (report.panDb, 1) + "dB" : juce::String ("pan=none"));
 
     if (options.normalize == NormalizeMode::peak)
         parts.add ("norm=" + juce::String (options.targetDb, 1) + "dBFS");

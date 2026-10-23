@@ -34,6 +34,7 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
     };
     label (presetLabel, WT_U8 ("プリセット"));
     label (humLabel, WT_U8 ("ハム除去"));
+    label (panLabel, WT_U8 ("L/R バランス"));
     label (normLabel, WT_U8 ("ノーマライズ"));
     label (targetLabel, WT_U8 ("目標"));
     label (ceilingLabel, WT_U8 ("ピークの上限 (dBFS)"));
@@ -46,12 +47,14 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
     humBox.addItem (WT_U8 ("自動 (50 / 60 Hz を判定)"), 2);
     humBox.addItem (WT_U8 ("50 Hz 固定"), 3);
     humBox.addItem (WT_U8 ("60 Hz 固定"), 4);
+    panBox.addItem (WT_U8 ("オフ"), 1);
+    panBox.addItem (WT_U8 ("自動 (一定のずれだけ補正)"), 2);
     cutOrderBox.addItem ("12 dB/oct", 1);
     cutOrderBox.addItem ("24 dB/oct", 2);
     normBox.addItem (WT_U8 ("オフ"), 1);
     normBox.addItem (WT_U8 ("Peak (dBFS)"), 2);
     normBox.addItem (WT_U8 ("LUFS (ラウドネス)"), 3);
-    for (auto* b : { &presetBox, &humBox, &cutOrderBox, &normBox })
+    for (auto* b : { &presetBox, &humBox, &panBox, &cutOrderBox, &normBox })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -74,20 +77,21 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
     }
 
     humStatusLabel.setColour (juce::Label::textColourId, theme::accent);
+    panStatusLabel.setColour (juce::Label::textColourId, theme::accent);
     selectionLabel.setColour (juce::Label::textColourId, theme::text);
     noteLabel.setColour (juce::Label::textColourId, theme::textDim);
     noteLabel.setFont (juce::FontOptions (12.0f));
     noteLabel.setMinimumHorizontalScale (1.0f);
     noteLabel.setText (WT_U8 ("A/B 試聴は B キー (ツールバーの「B: 整音後」)。元の録音は変更せず、書き出すファイルにだけ掛けます。"),
                        juce::dontSendNotification);
-    for (auto* l : { &humStatusLabel, &selectionLabel, &noteLabel })
+    for (auto* l : { &humStatusLabel, &panStatusLabel, &selectionLabel, &noteLabel })
         addAndMakeVisible (l);
 
     presetBox.onChange = [this] {
         if (! updating)
             applyPreset();
     };
-    for (auto* b : { &humBox, &cutOrderBox, &normBox })
+    for (auto* b : { &humBox, &panBox, &cutOrderBox, &normBox })
         b->onChange = [this] { edited(); };
     for (auto* t : { &dcToggle, &cutToggle, &ditherToggle, &gainToggle })
         t->onClick = [this] { edited(); };
@@ -98,7 +102,7 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
     }
 
     showSettings();
-    setSize (520, 420);
+    setSize (520, 478);
 }
 
 void ConditioningPanel::setSettings (const ConditionSettings& s)
@@ -115,6 +119,7 @@ void ConditioningPanel::showSettings()
     presetBox.setSelectedId ((int) settings.preset + 1, juce::dontSendNotification);
     dcToggle.setToggleState (o.dcRemove, juce::dontSendNotification);
     humBox.setSelectedId ((int) o.humMode + 1, juce::dontSendNotification);
+    panBox.setSelectedId ((int) o.panMode + 1, juce::dontSendNotification);
     cutToggle.setToggleState (o.lowCutHz > 0.0f, juce::dontSendNotification);
     cutHz.setText (numberText (o.lowCutHz > 0.0f ? o.lowCutHz : 20.0), false);
     cutOrderBox.setSelectedId (o.lowCutOrder >= 4 ? 2 : 1, juce::dontSendNotification);
@@ -158,6 +163,7 @@ void ConditioningPanel::edited()
     auto& o = settings.options;
     o.dcRemove = dcToggle.getToggleState();
     o.humMode = (HumMode) (humBox.getSelectedId() - 1);
+    o.panMode = (PanMode) (panBox.getSelectedId() - 1);
     o.lowCutHz = cutToggle.getToggleState() ? (float) juce::jlimit (10.0, 500.0, cutHz.getText().getDoubleValue()) : 0.0f;
     o.lowCutOrder = cutOrderBox.getSelectedId() == 2 ? 4 : 2;
     o.normalize = (NormalizeMode) (normBox.getSelectedId() - 1);
@@ -178,6 +184,8 @@ void ConditioningPanel::edited()
 void ConditioningPanel::updateReadouts()
 {
     humStatusLabel.setText (settings.options.humMode == HumMode::off ? juce::String() : WT_U8 ("この録音のハム: ") + (hooks.humStatus ? hooks.humStatus() : juce::String()),
+                            juce::dontSendNotification);
+    panStatusLabel.setText (settings.options.panMode == PanMode::off ? juce::String() : WT_U8 ("この録音: ") + (hooks.panStatus ? hooks.panStatus() : juce::String()),
                             juce::dontSendNotification);
     selectionLabel.setText (hooks.selectionInfo ? hooks.selectionInfo() : juce::String(), juce::dontSendNotification);
 }
@@ -210,6 +218,13 @@ void ConditioningPanel::resized()
     a = row();
     a.removeFromLeft (labelWidth);
     humStatusLabel.setBounds (a);
+
+    a = row();
+    panLabel.setBounds (a.removeFromLeft (labelWidth));
+    panBox.setBounds (a.removeFromLeft (230));
+    a = row();
+    a.removeFromLeft (labelWidth);
+    panStatusLabel.setBounds (a);
 
     a = row();
     cutToggle.setBounds (a.removeFromLeft (labelWidth));

@@ -21,6 +21,8 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
         source = &filtered;
         result.humHz = fileReport.humHz;
         result.humNotches = fileReport.humNotches;
+        result.panApplied = fileReport.panApplied;
+        result.panDb = fileReport.panDb;
     }
 
     bool firstGain = true;
@@ -57,6 +59,8 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
         report.dcOffset = fileReport.dcOffset;
         report.humHz = fileReport.humHz;
         report.humNotches = fileReport.humNotches;
+        report.panApplied = fileReport.panApplied;
+        report.panDb = fileReport.panDb;
         if (conditioning.normalize != NormalizeMode::off)
         {
             result.minGainDb = firstGain ? report.gainDb : juce::jmin (result.minGainDb, report.gainDb);

@@ -65,6 +65,7 @@ public:
     void testSetConditioning (const ConditionSettings& s) { setConditioning (s); }
     ConditioningPreview& testPreview() { return conditionPreview; }
     juce::String testHumStatus() const { return humStatusText(); }
+    juce::String testPanStatus() const { return panStatusText(); }
     juce::String testSelectionGain() { return selectionGainText(); }
     juce::String testSummary() const { return conditioningSummary(); }
     void testRefreshListening() { refreshListening(); }
@@ -109,6 +110,7 @@ private:
     void playRange (juce::int64 start, juce::int64 end, bool loop);
     juce::String conditioningSummary() const;
     juce::String humStatusText() const;
+    juce::String panStatusText() const;
     juce::String selectionGainText();
     void applySharedPreferences (const juce::var& prefs);
     void chooseCategory (const juce::String& name);

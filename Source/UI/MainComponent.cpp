@@ -597,6 +597,7 @@ void MainComponent::showConditioning()
         ConditioningPanel::Hooks hooks;
         hooks.changed = [this] (const ConditionSettings& s) { setConditioning (s); };
         hooks.humStatus = [this] { return humStatusText(); };
+        hooks.panStatus = [this] { return panStatusText(); };
         hooks.selectionInfo = [this] { return selectionGainText(); };
         conditioningWindow = std::make_unique<ConditioningWindow> (conditioning, std::move (hooks));
     }
@@ -617,6 +618,28 @@ juce::String MainComponent::humStatusText() const
     if (hum.mainsHz <= 0.0)
         return WT_U8 ("見つかりません (何もしません)");
     return juce::String (hum.mainsHz, 0) + WT_U8 (" Hz  (倍音 ") + juce::String ((int) hum.notchHz.size()) + WT_U8 (" 本を除去)");
+}
+
+juce::String MainComponent::panStatusText() const
+{
+    if (audio == nullptr)
+        return WT_U8 ("(録音を開くと表示します)");
+    if (! conditionPreview.panReady())
+        return WT_U8 ("調べています...");
+
+    const auto& pan = conditionPreview.getPan();
+    const auto db = [] (double v) { return juce::String (std::abs (v), 1) + " dB"; };
+    const auto side = pan.differenceDb >= 0 ? WT_U8 ("L が R より ") : WT_U8 ("R が L より ");
+    switch (pan.outcome)
+    {
+        case PanOutcome::applied:    return side + db (pan.differenceDb) + WT_U8 (" 大きい → ±") + juce::String (std::abs (pan.differenceDb) * 0.5, 1) + WT_U8 (" dB ずつ補正");
+        case PanOutcome::balanced:   return WT_U8 ("差は ") + db (pan.differenceDb) + WT_U8 (" (補正しません)");
+        case PanOutcome::tooLarge:   return side + db (pan.differenceDb) + WT_U8 (" 大きい: 意図的なパンか片側の不良の可能性があるため補正しません");
+        case PanOutcome::imageMoves: return WT_U8 ("ステレオ像が動いているため補正しません (差の幅 ") + db (pan.spreadDb) + ")";
+        case PanOutcome::notStereo:  return WT_U8 ("ステレオではないため対象外です");
+        case PanOutcome::tooShort:   break;
+    }
+    return WT_U8 ("音のある部分が足りないため判定できません (補正しません)");
 }
 
 juce::String MainComponent::selectionGainText()
@@ -689,6 +712,8 @@ juce::String MainComponent::conditioningSummary() const
         parts.add (WT_U8 ("ハム除去 (") + (o.humMode == HumMode::automatic ? WT_U8 ("自動") : o.humMode == HumMode::mains50 ? "50 Hz" : "60 Hz") + ")");
     if (o.lowCutHz > 0.0f)
         parts.add (WT_U8 ("ローカット ") + juce::String (o.lowCutHz, 0) + " Hz");
+    if (o.panMode != PanMode::off)
+        parts.add (WT_U8 ("L/R バランス"));
     if (o.normalize == NormalizeMode::peak)
         parts.add ("Peak " + juce::String (o.targetDb, 1) + " dBFS");
     else if (o.normalize == NormalizeMode::lufs)
@@ -1122,6 +1147,10 @@ void MainComponent::startExport()
                                           if (options.humMode != HumMode::off)
                                               lines.add (result.humHz > 0.0 ? WT_U8 ("ハム ") + juce::String (result.humHz, 0) + WT_U8 (" Hz を除去 (倍音 ") + juce::String (result.humNotches) + WT_U8 (" 本)")
                                                                             : WT_U8 ("ハムは見つからなかったため、何もしていません"));
+                                          if (options.panMode != PanMode::off)
+                                              lines.add (result.panApplied ? WT_U8 ("L/R バランス: ") + juce::String (result.panDb >= 0 ? "L" : "R") + WT_U8 (" が ") + juce::String (std::abs (result.panDb), 1)
+                                                                                 + WT_U8 (" dB 大きかったので ±") + juce::String (std::abs (result.panDb) * 0.5, 1) + WT_U8 (" dB ずつ補正")
+                                                                           : WT_U8 ("L/R バランスは補正が要らない(または補正できない)ため、何もしていません"));
                                           if (options.normalize != NormalizeMode::off)
                                           {
                                               const auto sign = [] (double v) { return juce::String (v >= 0 ? "+" : "") + juce::String (v, 1); };

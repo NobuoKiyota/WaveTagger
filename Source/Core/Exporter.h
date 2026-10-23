@@ -25,6 +25,10 @@ struct ExportResult
     // Hum removal: the mains frequency that was found (0 = none) and how many harmonics were notched
     double humHz = 0.0;
     int humNotches = 0;
+
+    // Left/right balance: whether it was corrected, and the measured left-minus-right difference in dB
+    bool panApplied = false;
+    double panDb = 0.0;
 };
 
 /** Writes each region as a 24-bit WAV (source rate / channels) with a short fade at both edges. Never overwrites.
