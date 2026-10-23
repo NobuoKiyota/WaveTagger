@@ -479,6 +479,120 @@ void addTpdfDither (juce::AudioBuffer<float>& buffer, int bits, juce::int64 seed
     }
 }
 
+void applyEdgeFade (juce::AudioBuffer<float>& buffer, int fadeSamples)
+{
+    const auto length = buffer.getNumSamples();
+    const auto f = juce::jmin (fadeSamples, length / 2);
+    if (f > 0)
+    {
+        buffer.applyGainRamp (0, f, 0.0f, 1.0f);
+        buffer.applyGainRamp (length - f, f, 1.0f, 0.0f);
+    }
+}
+
+ConditionOptions presetOptions (ConditionPreset preset)
+{
+    ConditionOptions o;
+    if (preset == ConditionPreset::standard)
+    {
+        o.dcRemove = true;
+        o.humMode = HumMode::automatic;
+        o.lowCutHz = 20.0f;
+        o.lowCutOrder = 2;
+        o.normalize = NormalizeMode::peak;
+        o.targetDb = -1.0;
+    }
+    return o;
+}
+
+namespace
+{
+const char* const presetNames[] = { "off", "standard", "custom" };
+const char* const humNames[] = { "off", "auto", "50", "60" };
+const char* const normalizeNames[] = { "off", "peak", "lufs" };
+
+template <typename Enum, size_t N>
+Enum enumFrom (const juce::var& v, const char* const (&names)[N], Enum fallback)
+{
+    const auto s = v.toString();
+    for (size_t i = 0; i < N; ++i)
+        if (s == names[i])
+            return (Enum) i;
+    return fallback;
+}
+} // namespace
+
+juce::var conditionSettingsToVar (const ConditionSettings& s)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("preset", presetNames[(int) s.preset]);
+    o->setProperty ("dcRemove", s.options.dcRemove);
+    o->setProperty ("hum", humNames[(int) s.options.humMode]);
+    o->setProperty ("lowCutHz", (double) s.options.lowCutHz);
+    o->setProperty ("lowCutOrder", s.options.lowCutOrder);
+    o->setProperty ("normalize", normalizeNames[(int) s.options.normalize]);
+    o->setProperty ("targetDb", s.options.targetDb);
+    o->setProperty ("ceilingDb", s.options.ceilingDb);
+    o->setProperty ("dither", s.options.dither);
+    o->setProperty ("previewGain", s.previewGain);
+    return juce::var (o);
+}
+
+ConditionSettings conditionSettingsFromVar (const juce::var& v)
+{
+    ConditionSettings s;
+    if (! v.isObject())
+        return s;
+
+    s.preset = enumFrom (v.getProperty ("preset", {}), presetNames, ConditionPreset::off);
+    auto& o = s.options;
+    o.dcRemove = (bool) v.getProperty ("dcRemove", false);
+    o.humMode = enumFrom (v.getProperty ("hum", {}), humNames, HumMode::off);
+
+    const auto cut = (double) v.getProperty ("lowCutHz", 0.0);
+    o.lowCutHz = cut >= 1.0 ? (float) juce::jlimit (10.0, 500.0, cut) : 0.0f;
+    o.lowCutOrder = (int) v.getProperty ("lowCutOrder", 2) >= 4 ? 4 : 2;
+
+    o.normalize = enumFrom (v.getProperty ("normalize", {}), normalizeNames, NormalizeMode::off);
+    o.targetDb = juce::jlimit (-60.0, 0.0, (double) v.getProperty ("targetDb", -1.0));
+    o.ceilingDb = juce::jlimit (-24.0, 0.0, (double) v.getProperty ("ceilingDb", -1.0));
+    o.dither = (bool) v.getProperty ("dither", true);
+    s.previewGain = (bool) v.getProperty ("previewGain", false);
+
+    // a stored "preset" that no longer matches the values is just custom
+    if (s.preset != ConditionPreset::custom && o != presetOptions (s.preset))
+        s.preset = ConditionPreset::custom;
+    return s;
+}
+
+PreviewGain previewGainFor (const juce::AudioBuffer<float>& source, double sampleRate, juce::int64 start, juce::int64 end,
+                            const ConditionOptions& options, float fadeMs)
+{
+    PreviewGain result;
+    if (options.normalize == NormalizeMode::off)
+        return result;
+
+    start = juce::jlimit<juce::int64> (0, source.getNumSamples(), start);
+    end = juce::jlimit<juce::int64> (start, source.getNumSamples(), end);
+    if (end <= start)
+        return result;
+
+    if ((double) (end - start) > maxPreviewSeconds * sampleRate)
+    {
+        result.available = false;
+        return result;
+    }
+
+    juce::AudioBuffer<float> segment (source.getNumChannels(), (int) (end - start));
+    for (int ch = 0; ch < source.getNumChannels(); ++ch)
+        segment.copyFrom (ch, 0, source, ch, (int) start, segment.getNumSamples());
+
+    applyEdgeFade (segment, (int) (fadeMs * 0.001 * sampleRate));
+    conditionCycle (segment, sampleRate, options, result.report);
+    result.gain = std::pow (10.0, result.report.gainDb / 20.0);
+    return result;
+}
+
 juce::String describeConditioning (const ConditionOptions& options, const ConditionReport& report)
 {
     juce::StringArray parts;

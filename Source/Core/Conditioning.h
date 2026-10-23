@@ -39,6 +39,8 @@ struct ConditionOptions
 
     bool dither = true; // TPDF, only when writing 16-bit and something above was applied
 
+    bool operator== (const ConditionOptions&) const = default;
+
     /** Stage A: needs the whole recording (filters need run-up, so they run before cutting). */
     bool needsFile() const { return dcRemove || humMode != HumMode::off || lowCutHz > 0.0f; }
     bool active() const { return needsFile() || normalize != NormalizeMode::off; }
@@ -84,4 +86,48 @@ void addTpdfDither (juce::AudioBuffer<float>& buffer, int bits, juce::int64 seed
 
 /** e.g. "cond=dc,lc20Hz/2,norm=-1.0dBFS,gain=+3.2dB" for the WAV comment. */
 juce::String describeConditioning (const ConditionOptions& options, const ConditionReport& report);
+
+/** Short fade in and out of `fadeSamples` (the exporter's edge fade; the preview gain must see the same signal). */
+void applyEdgeFade (juce::AudioBuffer<float>& buffer, int fadeSamples);
+
+//==============================================================================
+enum class ConditionPreset
+{
+    off,
+    standard, // DC, automatic hum, 20 Hz low cut, Peak -1 dBFS
+    custom
+};
+
+/** The options a preset stands for (custom has none of its own: it is whatever the options say). */
+ConditionOptions presetOptions (ConditionPreset preset);
+
+/** What is kept in the shared preferences. */
+struct ConditionSettings
+{
+    ConditionPreset preset = ConditionPreset::off;
+    ConditionOptions options;
+    bool previewGain = false; // A/B listening includes the normalisation gain
+
+    bool operator== (const ConditionSettings&) const = default;
+};
+
+juce::var conditionSettingsToVar (const ConditionSettings& settings);
+
+/** Missing, unknown or out-of-range values fall back to "off" / are clamped; never throws. */
+ConditionSettings conditionSettingsFromVar (const juce::var& v);
+
+/** Longest range whose normalisation gain is worked out for listening (longer ones play at unity). */
+constexpr double maxPreviewSeconds = 60.0;
+
+struct PreviewGain
+{
+    double gain = 1.0;
+    bool available = true; // false: normalisation is on but the range is too long to measure
+    ConditionReport report;
+};
+
+/** The gain the exporter would apply to [start, end) of `source` (which already has stage A applied):
+    same edge fade, same normalisation. */
+PreviewGain previewGainFor (const juce::AudioBuffer<float>& source, double sampleRate, juce::int64 start, juce::int64 end,
+                            const ConditionOptions& options, float fadeMs = 2.0f);
 } // namespace wt

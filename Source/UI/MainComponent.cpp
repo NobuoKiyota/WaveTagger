@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "Core/AudioFeatures.h"
+#include "Core/Conditioning.h"
 #include "Core/Exporter.h"
 #include "Core/WavChunks.h"
 #include "Core/Categories.h"
@@ -60,6 +61,20 @@ MainComponent::MainComponent()
     };
     inputButton.setButtonText (WT_U8 ("設定..."));
     inputButton.onClick = [this] { showInputSettings(); };
+
+    conditionButton.setButtonText (WT_U8 ("整音..."));
+    conditionButton.setWantsKeyboardFocus (false);
+    conditionButton.onClick = [this] { showConditioning(); };
+    addAndMakeVisible (conditionButton);
+    abToggle.setButtonText (WT_U8 ("B: 整音後で試聴"));
+    abToggle.setWantsKeyboardFocus (false);
+    abToggle.onClick = [this] { refreshListening(); };
+    addAndMakeVisible (abToggle);
+    conditionPreview.onChanged = [this] {
+        refreshListening();
+        if (conditioningWindow != nullptr)
+            conditioningWindow->getPanel().updateReadouts();
+    };
 
     const auto schemes = theme::getSpectrogramSchemeNames();
     for (int i = 0; i < schemes.size(); ++i)
@@ -123,7 +138,7 @@ MainComponent::MainComponent()
 
     waveView.onCursorClicked = [this] (juce::int64 s) {
         if (playback.isPlaying())
-            playback.play (s, -1, transport.isLooping());
+            playRange (s, -1, transport.isLooping());
     };
     waveView.onCycleClicked = [this] (int index) {
         list.selectRow (index);
@@ -216,6 +231,8 @@ MainComponent::~MainComponent()
     catalog.removeChangeListener (this);
     libraryWindow = nullptr;
     organizerWindow = nullptr;
+    conditioningWindow = nullptr;
+    conditionPreview.onChanged = nullptr;
     loader.removeAllJobs (true, 10000);
     spectrogram.onNewImage = nullptr;
     waveView.setCycleModel (nullptr);
@@ -275,6 +292,11 @@ void MainComponent::applySharedPreferences (const juce::var& v)
     continueToggle.setToggleState ((bool) v.getProperty ("continueNumbering", true), juce::dontSendNotification);
     wheelMap.fromVar (v.getProperty ("wheel", {}));
 
+    conditioning = conditionSettingsFromVar (v.getProperty ("conditioning", {}));
+    conditionPreview.setOptions (conditioning.options);
+    if (conditioningWindow != nullptr)
+        conditioningWindow->getPanel().setSettings (conditioning);
+
     const auto scheme = juce::jlimit (0, schemeCombo.getNumItems() - 1, (int) v.getProperty ("scheme", 0));
     schemeCombo.setSelectedId (scheme + 1, juce::dontSendNotification);
     waveView.setColourScheme (scheme);
@@ -325,6 +347,7 @@ void MainComponent::saveNow()
         shared->setProperty ("categoryUsage", catalog.usageToVar());
         shared->setProperty ("categoryProfiles", profiles.toVar());
         shared->setProperty ("scheme", schemeCombo.getSelectedId() - 1);
+        shared->setProperty ("conditioning", conditionSettingsToVar (conditioning));
 
         const auto prefsFile = catalog.getPreferencesFile();
         if (prefsFile.getParentDirectory().isDirectory())
@@ -383,6 +406,11 @@ void MainComponent::audioLoaded (AudioDataPtr data, const juce::String& error)
 
     audio = std::move (data);
     playback.setAudio (audio);
+    playback.setGain (1.0f);
+    abToggle.setToggleState (false, juce::dontSendNotification); // a new recording starts on the original
+    abToggle.setButtonText (WT_U8 ("B: 整音後で試聴"));
+    conditionPreview.setAudio (audio);
+    selectionGainCache = {};
     waveView.setAudio (audio);
     overview.setAudio (audio);
     view.reset (audio->getNumSamples(), audio->sampleRate);
@@ -498,16 +526,174 @@ void MainComponent::togglePlay()
 
     if (view.hasSelection())
     {
-        playback.play (view.getSelectionStart(), view.getSelectionEnd(), transport.isLooping());
+        playRange (view.getSelectionStart(), view.getSelectionEnd(), transport.isLooping());
         return;
     }
 
     // Space on a previewed cycle replays exactly that cycle
     const auto rows = list.getSelectedRows();
     if (rows.size() == 1 && rows[0] < cycles.size() && cycles[rows[0]].start == view.getCursor())
-        playback.play (cycles[rows[0]].start, cycles[rows[0]].end, transport.isLooping());
+        playRange (cycles[rows[0]].start, cycles[rows[0]].end, transport.isLooping());
     else
-        playback.play (view.getCursor(), -1, transport.isLooping());
+        playRange (view.getCursor(), -1, transport.isLooping());
+}
+
+//==============================================================================
+/** Hands a range to the player, with the version (original / conditioned) and gain that the A/B switch asks for. */
+void MainComponent::playRange (juce::int64 start, juce::int64 end, bool loop)
+{
+    playStart = start;
+    playEnd = end;
+    refreshListening();
+    playback.play (start, end, loop);
+}
+
+void MainComponent::refreshListening()
+{
+    if (audio == nullptr)
+        return;
+
+    const auto wantB = abToggle.getToggleState();
+    AudioDataPtr source = audio;
+    auto ready = true;
+    if (wantB)
+    {
+        conditionPreview.requestProcessed();
+        if (const auto processed = conditionPreview.getProcessed())
+            source = processed;
+        else
+            ready = false; // still being made: the original keeps playing in the meantime
+    }
+    else
+    {
+        conditionPreview.releaseProcessed();
+    }
+
+    playback.swapAudio (source);
+
+    double gain = 1.0;
+    const auto& options = conditioning.options;
+    if (wantB && ready && conditioning.previewGain && options.normalize != NormalizeMode::off)
+        gain = previewGainFor (source->buffer, source->sampleRate, playStart, playEnd < 0 ? audio->getNumSamples() : playEnd, options).gain;
+    playback.setGain ((float) gain);
+
+    abToggle.setButtonText (wantB && ! ready ? WT_U8 ("B: 整音後を作成中...") : WT_U8 ("B: 整音後で試聴"));
+}
+
+void MainComponent::setConditioning (const ConditionSettings& settings)
+{
+    conditioning = settings;
+    conditionPreview.setOptions (settings.options);
+    refreshListening();
+    if (conditioningWindow != nullptr)
+        conditioningWindow->getPanel().updateReadouts();
+    scheduleSave();
+}
+
+void MainComponent::showConditioning()
+{
+    if (conditioningWindow == nullptr)
+    {
+        ConditioningPanel::Hooks hooks;
+        hooks.changed = [this] (const ConditionSettings& s) { setConditioning (s); };
+        hooks.humStatus = [this] { return humStatusText(); };
+        hooks.selectionInfo = [this] { return selectionGainText(); };
+        conditioningWindow = std::make_unique<ConditioningWindow> (conditioning, std::move (hooks));
+    }
+
+    conditioningWindow->getPanel().setSettings (conditioning);
+    conditioningWindow->setVisible (true);
+    conditioningWindow->toFront (true);
+}
+
+juce::String MainComponent::humStatusText() const
+{
+    if (audio == nullptr)
+        return WT_U8 ("(録音を開くと表示します)");
+    if (! conditionPreview.humReady())
+        return WT_U8 ("調べています...");
+
+    const auto& hum = conditionPreview.getHum();
+    if (hum.mainsHz <= 0.0)
+        return WT_U8 ("見つかりません (何もしません)");
+    return juce::String (hum.mainsHz, 0) + WT_U8 (" Hz  (倍音 ") + juce::String ((int) hum.notchHz.size()) + WT_U8 (" 本を除去)");
+}
+
+juce::String MainComponent::selectionGainText()
+{
+    if (audio == nullptr)
+        return {};
+
+    const auto rows = list.getSelectedRows();
+    juce::int64 start = 0, end = 0;
+    if (rows.size() == 1 && rows[0] < cycles.size())
+    {
+        start = cycles[rows[0]].start;
+        end = cycles[rows[0]].end;
+    }
+    else if (view.hasSelection())
+    {
+        start = view.getSelectionStart();
+        end = view.getSelectionEnd();
+    }
+    else
+    {
+        return WT_U8 ("サイクルか範囲を選ぶと、ここにノーマライズの結果が出ます");
+    }
+
+    const auto& options = conditioning.options;
+    if (options.normalize == NormalizeMode::off)
+        return WT_U8 ("ノーマライズはオフです");
+
+    // stage A shows up in the peak a little, so before the conditioned copy exists this is only an estimate
+    const auto processed = conditionPreview.getProcessed();
+    const auto estimate = options.needsFile() && processed == nullptr;
+    const auto source = processed != nullptr ? processed : audio;
+
+    auto& cache = selectionGainCache;
+    if (cache.start != start || cache.end != end || cache.source != source.get() || ! (cache.options == options))
+    {
+        cache.start = start;
+        cache.end = end;
+        cache.source = source.get();
+        cache.options = options;
+
+        const auto pg = previewGainFor (source->buffer, source->sampleRate, start, end, options);
+        if (! pg.available)
+        {
+            cache.text = WT_U8 ("選択が 60 秒を超えるため、ここでは計算しません (書き出しでは掛かります)");
+        }
+        else
+        {
+            const auto sign = [] (double v) { return juce::String (v >= 0 ? "+" : "") + juce::String (v, 1); };
+            cache.text = WT_U8 ("選択: ピーク ") + juce::String (pg.report.peakBeforeDb, 1) + " -> " + juce::String (pg.report.peakAfterDb, 1)
+                         + " dBFS  (" + sign (pg.report.gainDb) + " dB)";
+            if (options.normalize == NormalizeMode::lufs)
+                cache.text += WT_U8 ("   ラウドネス ") + juce::String (pg.report.lufsBefore, 1) + " -> " + juce::String (pg.report.lufsBefore + pg.report.gainDb, 1) + " LUFS";
+            if (pg.report.gainLimited)
+                cache.text += WT_U8 ("   ※上限で止まりました");
+            if (estimate)
+                cache.text += WT_U8 ("   (目安)");
+        }
+    }
+    return cache.text;
+}
+
+juce::String MainComponent::conditioningSummary() const
+{
+    const auto& o = conditioning.options;
+    juce::StringArray parts;
+    if (o.dcRemove)
+        parts.add (WT_U8 ("DC 除去"));
+    if (o.humMode != HumMode::off)
+        parts.add (WT_U8 ("ハム除去 (") + (o.humMode == HumMode::automatic ? WT_U8 ("自動") : o.humMode == HumMode::mains50 ? "50 Hz" : "60 Hz") + ")");
+    if (o.lowCutHz > 0.0f)
+        parts.add (WT_U8 ("ローカット ") + juce::String (o.lowCutHz, 0) + " Hz");
+    if (o.normalize == NormalizeMode::peak)
+        parts.add ("Peak " + juce::String (o.targetDb, 1) + " dBFS");
+    else if (o.normalize == NormalizeMode::lufs)
+        parts.add (juce::String (o.targetDb, 1) + " LUFS");
+    return parts.joinIntoString (" / ");
 }
 
 void MainComponent::stopPlayback()
@@ -521,6 +707,9 @@ void MainComponent::onVBlank()
         catalog.reloadIfChanged();
 
     suggestTick();
+
+    if (frameCounter % 15 == 0 && conditioningWindow != nullptr && conditioningWindow->isVisible())
+        conditioningWindow->getPanel().updateReadouts();
 
     const auto playing = playback.isPlaying();
 
@@ -759,7 +948,7 @@ void MainComponent::previewCycle (int index)
     const auto& c = cycles[index];
     view.setCursor (c.start);
     view.ensureVisible ((double) c.start);
-    playback.play (c.start, c.end, false);
+    playRange (c.start, c.end, false);
 }
 
 void MainComponent::deleteSelectedCycles()
@@ -901,9 +1090,13 @@ void MainComponent::startExport()
         start = juce::File ("G:\\SFX_Library\\Library").isDirectory() ? juce::File ("G:\\SFX_Library\\Library")
                                                                        : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
 
-    chooser = std::make_unique<juce::FileChooser> (WT_U8 ("書き出し先フォルダを選択 (中に \"") + folder + WT_U8 ("\" フォルダを作ります)"), start);
+    auto title = WT_U8 ("書き出し先フォルダを選択 (中に \"") + folder + WT_U8 ("\" フォルダを作ります)");
+    if (conditioning.options.active())
+        title += WT_U8 ("  整音: ") + conditioningSummary();
+
+    chooser = std::make_unique<juce::FileChooser> (title, start);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                          [this, items = std::move (items), untyped] (const juce::FileChooser& fc) {
+                          [this, items = std::move (items), untyped, options = conditioning.options] (const juce::FileChooser& fc) {
                               const auto root = fc.getResult();
                               if (! root.isDirectory())
                                   return;
@@ -914,15 +1107,30 @@ void MainComponent::startExport()
                               juce::Component::SafePointer<MainComponent> safe (this);
                               auto data = audio;
                               const auto dest = root.getChildFile (items.front().subFolder);
-                              loader.addJob ([safe, data, items, untyped, root, dest] {
-                                  const auto result = exportCycles (*data, items, root);
-                                  juce::MessageManager::callAsync ([safe, result, untyped, root, dest] {
+                              loader.addJob ([safe, data, items, untyped, root, dest, options] {
+                                  const auto result = exportCycles (*data, items, root, 24, 2.0f, options);
+                                  juce::MessageManager::callAsync ([safe, result, untyped, root, dest, options] {
                                       if (safe != nullptr && result.written > 0)
                                       {
                                           safe->afterExport (dest);
                                           safe->recordLabels ("export");
                                       }
                                       juce::String msg = juce::String (result.written) + WT_U8 (" 件を書き出しました\n") + root.getFullPathName();
+                                      if (options.active() && result.written > 0)
+                                      {
+                                          juce::StringArray lines;
+                                          if (options.humMode != HumMode::off)
+                                              lines.add (result.humHz > 0.0 ? WT_U8 ("ハム ") + juce::String (result.humHz, 0) + WT_U8 (" Hz を除去 (倍音 ") + juce::String (result.humNotches) + WT_U8 (" 本)")
+                                                                            : WT_U8 ("ハムは見つからなかったため、何もしていません"));
+                                          if (options.normalize != NormalizeMode::off)
+                                          {
+                                              const auto sign = [] (double v) { return juce::String (v >= 0 ? "+" : "") + juce::String (v, 1); };
+                                              lines.add (WT_U8 ("ゲイン ") + sign (result.minGainDb) + " ... " + sign (result.maxGainDb) + " dB");
+                                              if (result.gainLimited > 0)
+                                                  lines.add (juce::String (result.gainLimited) + WT_U8 (" 件は上限 (ピークの上限 / 最大ゲイン) で止まり、目標に届いていません"));
+                                          }
+                                          msg += WT_U8 ("\n\n整音しました: ") + lines.joinIntoString ("\n");
+                                      }
                                       if (untyped > 0)
                                           msg += "\n\n" + juce::String (untyped) + WT_U8 (" 件は未分類のためスキップしました");
                                       if (result.skippedExisting.size() > 0)
@@ -1744,6 +1952,14 @@ void MainComponent::resized()
 
     palette.setBounds (r.removeFromTop (PalettePanel::height));
     transport.setBounds (r.removeFromBottom (transportHeight));
+
+    // the conditioning controls sit in the empty middle of the transport bar, next to the play controls
+    auto tb = transport.getBounds().withTrimmedLeft (430).withHeight (28).withY (transport.getY() + (transportHeight - 28) / 2);
+    conditionButton.setBounds (tb.removeFromLeft (70));
+    tb.removeFromLeft (8);
+    abToggle.setBounds (tb.removeFromLeft (160));
+    conditionButton.toFront (false);
+    abToggle.toFront (false);
     list.setBounds (r.removeFromBottom (listHeight));
     hintLabel.setBounds (r.removeFromBottom (22).reduced (8, 0));
     overview.setBounds (r.removeFromTop (overviewHeight)
@@ -1813,6 +2029,10 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         case Action::SaveWav:       saveMarkersToWav(); break;
         case Action::AcceptSuggestion:
             acceptSuggestions (list.getSelectedRows());
+            break;
+        case Action::ToggleConditioned:
+            abToggle.setToggleState (! abToggle.getToggleState(), juce::dontSendNotification);
+            refreshListening();
             break;
         default:
             if (action >= Action::Type1 && action <= Action::Type9)

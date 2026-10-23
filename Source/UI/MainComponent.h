@@ -8,11 +8,13 @@
 #include "Core/LabelStore.h"
 #include "Core/Suggester.h"
 #include "Core/CategoryProfiles.h"
+#include "Core/ConditioningPreview.h"
 #include "Core/CycleModel.h"
 #include "Core/EmbeddedState.h"
 #include "Core/LibraryIndex.h"
 #include "Core/PlaybackEngine.h"
 #include "Core/SpectrogramRenderer.h"
+#include "ConditioningPanel.h"
 #include "CycleList.h"
 #include "InputMap.h"
 #include "InboxWindow.h"
@@ -59,6 +61,13 @@ public:
     const CategoryProfiles& testProfiles() const { return profiles; }
     CycleModel& testCyclesMutable() { return cycles; }
     const CycleModel& testCycles() const { return cycles; }
+    const ConditionSettings& testConditioning() const { return conditioning; }
+    void testSetConditioning (const ConditionSettings& s) { setConditioning (s); }
+    ConditioningPreview& testPreview() { return conditionPreview; }
+    juce::String testHumStatus() const { return humStatusText(); }
+    juce::String testSelectionGain() { return selectionGainText(); }
+    juce::String testSummary() const { return conditioningSummary(); }
+    void testRefreshListening() { refreshListening(); }
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -94,6 +103,13 @@ private:
     void setLibraryRoots (const juce::StringArray& roots);
     void afterExport (const juce::File& destFolder);
     void showInputSettings();
+    void showConditioning();
+    void setConditioning (const ConditionSettings& settings);
+    void refreshListening();
+    void playRange (juce::int64 start, juce::int64 end, bool loop);
+    juce::String conditioningSummary() const;
+    juce::String humStatusText() const;
+    juce::String selectionGainText();
     void applySharedPreferences (const juce::var& prefs);
     void chooseCategory (const juce::String& name);
     void applyCategoryProfile (const juce::String& name, const CategoryProfile& profile);
@@ -154,10 +170,22 @@ private:
     LibraryIndex libraryIndex;
     std::unique_ptr<LibraryWindow> libraryWindow;
     AudioDataPtr audio;
+    ConditionSettings conditioning;
+    ConditioningPreview conditionPreview;
+    std::unique_ptr<ConditioningWindow> conditioningWindow;
+    juce::int64 playStart = 0, playEnd = -1; // the range last handed to the player
+    struct
+    {
+        juce::int64 start = -1, end = -1;
+        const AudioData* source = nullptr;
+        ConditionOptions options;
+        juce::String text;
+    } selectionGainCache;
 
     juce::TextButton openButton { "Open" }, inboxButton { "Inbox" }, inputButton { "Settings..." };
     juce::TextButton importButton { "Import markers" }, splitButton { "Auto split" }, exportButton { "Export..." }, libraryButton { "Library" };
-    juce::ToggleButton autoPreviewToggle { "Auto preview" }, continueToggle { "Continue numbering" };
+    juce::TextButton conditionButton { "Tone" };
+    juce::ToggleButton autoPreviewToggle { "Auto preview" }, continueToggle { "Continue numbering" }, abToggle { "B" };
     juce::Label fileLabel, blendLabel, floorLabel, hintLabel;
     juce::ComboBox schemeCombo;
     WheelMap wheelMap;

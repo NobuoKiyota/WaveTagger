@@ -14,6 +14,13 @@ public:
 
     void setAudio (AudioDataPtr audio);
 
+    /** Swaps in another version of the same recording (same length) without interrupting playback, e.g. the conditioned one
+        for A/B listening. A different length is refused: the play range would no longer fit. Returns false then. */
+    bool swapAudio (AudioDataPtr audio);
+
+    /** Linear gain on the output (A/B listening with the normalisation gain). Changes are ramped, never stepped. */
+    void setGain (float linear) { source.gain = linear; }
+
     /** end < 0 plays to the end of the file. */
     void play (juce::int64 start, juce::int64 end, bool loop);
     void stop();
@@ -39,6 +46,8 @@ private:
         AudioDataPtr audio;
         std::atomic<juce::int64> position { 0 }, rangeStart { 0 }, rangeEnd { 0 };
         std::atomic<bool> playing { false }, loop { false }, stopRequested { false }, justStarted { false };
+        std::atomic<float> gain { 1.0f };
+        float appliedGain = 1.0f; // audio thread only
     };
 
     juce::AudioDeviceManager deviceManager;

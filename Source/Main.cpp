@@ -20,6 +20,7 @@
 #include "UI/InputSettings.h"
 #include "UI/MainComponent.h"
 #include "UI/Theme.h"
+#include "Util/Text.h"
 
 namespace wt
 {
@@ -90,7 +91,7 @@ public:
             return;
         }
 
-        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
+        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-conditioning" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
         {
             snapshotComponent (args[0], toFile (args[1]));
             return;
@@ -192,6 +193,16 @@ private:
             hooks.getStatus = [] { return juce::String ("watching"); };
             content = std::make_unique<InboxPanel> (demoQueue, hooks);
         }
+        else if (mode == "--snapshot-conditioning")
+        {
+            ConditioningPanel::Hooks hooks;
+            hooks.humStatus = [] { return WT_U8 ("60 Hz  (倍音 4 本を除去)"); };
+            hooks.selectionInfo = [] { return WT_U8 ("選択: ピーク -12.3 -> -1.0 dBFS  (+11.3 dB)"); };
+            ConditionSettings demo;
+            demo.preset = ConditionPreset::standard;
+            demo.options = presetOptions (ConditionPreset::standard);
+            content = std::make_unique<ConditioningPanel> (demo, std::move (hooks));
+        }
         else if (picker)
             content = std::make_unique<CategoryPicker> (catalog, "TOOLS", [] (const juce::String&) {}, [] {});
         else
@@ -201,7 +212,7 @@ private:
                 input->setCurrentTabIndex (tab.getIntValue());
             content = std::move (input);
         }
-        if (mode != "--snapshot-organizer")
+        if (mode != "--snapshot-organizer" && mode != "--snapshot-conditioning")
             content->setSize (mode == "--snapshot-inbox" ? 1000 : picker ? 400 : 800, mode == "--snapshot-inbox" ? 460 : picker ? 560 : 580);
 
         const auto image = content->createComponentSnapshot (content->getLocalBounds());
@@ -2050,6 +2061,191 @@ private:
             check (std::abs (mean (z, 0)) < 0.02 * lsb && std::abs (rms (z, 0, z.getNumSamples()) / lsb - 0.4082) < 0.01
                        && z.getMagnitude (0, 0, z.getNumSamples()) < (float) lsb,
                    "TPDF dither: zero mean, 0.41 LSB rms, never more than 1 LSB");
+        }
+
+        // ---- settings: stored, read back, clamped
+        {
+            ConditionSettings s;
+            s.preset = ConditionPreset::custom;
+            s.options.dcRemove = true;
+            s.options.humMode = HumMode::mains60;
+            s.options.lowCutHz = 35.0f;
+            s.options.lowCutOrder = 4;
+            s.options.normalize = NormalizeMode::lufs;
+            s.options.targetDb = -23.0;
+            s.options.ceilingDb = -2.0;
+            s.options.dither = false;
+            s.previewGain = true;
+            const auto json = juce::JSON::toString (conditionSettingsToVar (s));
+            check (conditionSettingsFromVar (juce::JSON::parse (json)) == s, "settings survive being written as JSON and read back");
+
+            check (conditionSettingsFromVar ({}) == ConditionSettings {} && ! ConditionSettings {}.options.active(), "no stored settings means everything off");
+
+            auto* wild = new juce::DynamicObject();
+            wild->setProperty ("preset", "bogus");
+            wild->setProperty ("hum", "bogus");
+            wild->setProperty ("lowCutHz", 99999.0);
+            wild->setProperty ("lowCutOrder", 7);
+            wild->setProperty ("normalize", "peak");
+            wild->setProperty ("targetDb", 55.0);
+            wild->setProperty ("ceilingDb", -100.0);
+            const auto clamped = conditionSettingsFromVar (juce::var (wild));
+            check (clamped.options.humMode == HumMode::off && clamped.options.lowCutHz == 500.0f && clamped.options.lowCutOrder == 4
+                       && clamped.options.targetDb == 0.0 && clamped.options.ceilingDb == -24.0 && clamped.preset == ConditionPreset::custom,
+                   "unknown names fall back to off, numbers are clamped to sensible ranges");
+
+            auto preset = conditionSettingsToVar ({ ConditionPreset::standard, presetOptions (ConditionPreset::standard), false });
+            check (conditionSettingsFromVar (preset).preset == ConditionPreset::standard, "a preset that still matches its values stays that preset");
+            preset.getDynamicObject()->setProperty ("lowCutHz", 80.0);
+            check (conditionSettingsFromVar (preset).preset == ConditionPreset::custom, "a preset whose values were changed by hand becomes custom");
+        }
+
+        // ---- listening gain is the gain the exporter applies
+        {
+            ConditionOptions o;
+            o.dcRemove = true;
+            o.lowCutHz = 30.0f;
+            o.normalize = NormalizeMode::peak;
+            o.targetDb = -3.0;
+
+            AudioData data;
+            data.sampleRate = 48000.0;
+            data.bitsPerSample = 24;
+            data.buffer.setSize (2, 48000 * 4);
+            juce::Random rnd (21);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < data.buffer.getNumSamples(); ++i)
+                    data.buffer.setSample (ch, i, (rnd.nextFloat() - 0.5f) * 0.2f + 0.03f);
+
+            auto stageA = data.buffer;
+            conditionFile (stageA, 48000.0, o, rep);
+            const auto pg = previewGainFor (stageA, 48000.0, 12000, 60000, o);
+
+            const auto base = testRoot.getChildFile ("condition_preview_test");
+            base.deleteRecursively();
+            const auto res = exportCycles (data, { { 12000, 60000, "P", "p", "" } }, base, 24, 2.0f, o);
+            check (pg.available && res.written == 1 && std::abs (db (pg.gain) - res.minGainDb) < 1.0e-3 && std::abs (pg.report.peakAfterDb - (-3.0)) < 1.0e-3,
+                   "the gain heard in A/B listening is the one the export applies");
+
+            juce::AudioBuffer<float> longOne (1, (int) (70.0 * 8000.0));
+            longOne.clear();
+            const auto tooLong = previewGainFor (longOne, 8000.0, 0, longOne.getNumSamples(), o);
+            check (! tooLong.available && tooLong.gain == 1.0, "a range over a minute is not measured (plays at unity)");
+            check (previewGainFor (stageA, 48000.0, 0, 48000, ConditionOptions {}).gain == 1.0, "without normalisation the listening gain is 1");
+        }
+
+        // ---- the conditioned copy is made in the background and never earlier than asked for
+        {
+            const double sr = 48000.0;
+            auto source = std::make_shared<AudioData>();
+            source->sampleRate = sr;
+            source->bitsPerSample = 24;
+            source->buffer.setSize (2, (int) (sr * 6));
+            juce::Random rnd (41);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < source->buffer.getNumSamples(); ++i)
+                    source->buffer.setSample (ch, i, (float) ((rnd.nextFloat() - 0.5) * 0.004 + 0.02 + 0.01 * std::sin (2.0 * pi * 60.0 * i / sr)
+                                                              + 0.006 * std::sin (2.0 * pi * 120.0 * i / sr) + 0.004 * std::sin (2.0 * pi * 180.0 * i / sr)));
+            const AudioDataPtr audioPtr = source;
+            const auto untouched = source->buffer;
+
+            const auto pump = [] (const std::function<bool()>& done, int maxMs) {
+                for (int t = 0; t < maxMs && ! done(); t += 50)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+                return done();
+            };
+
+            ConditioningPreview preview;
+            int changes = 0;
+            preview.onChanged = [&] { ++changes; };
+            preview.setAudio (audioPtr);
+
+            ConditionOptions o;
+            o.dcRemove = true;
+            o.humMode = HumMode::automatic;
+            preview.setOptions (o);
+            check (pump ([&] { return preview.humReady(); }, 10000) && preview.getHum().mainsHz == 60.0, "the hum in the recording is looked for in the background");
+            check (preview.getProcessed() == nullptr && ! preview.isBuilding(), "no copy is made until one is asked for");
+
+            preview.requestProcessed();
+            check (pump ([&] { return preview.getProcessed() != nullptr; }, 15000), "the conditioned copy arrives");
+            const auto copy = preview.getProcessed();
+            auto expected = untouched;
+            conditionFile (expected, sr, o, rep);
+            check (copy != nullptr && copy != audioPtr && identical (copy->buffer, expected) && identical (source->buffer, untouched) && preview.getFileReport().humHz == 60.0,
+                   "it is the same as conditioning directly, and the original is untouched");
+
+            // two quick changes: only the last one is built
+            auto o2 = o;
+            o2.humMode = HumMode::off;
+            auto o3 = o;
+            o3.humMode = HumMode::off;
+            o3.lowCutHz = 100.0f;
+            preview.setOptions (o2);
+            preview.setOptions (o3);
+            check (preview.getProcessed() == nullptr, "a change makes the old copy stale at once");
+            check (pump ([&] { return preview.getProcessed() != nullptr; }, 15000), "and a new one is built (the processed copy stays wanted)");
+            auto expected3 = untouched;
+            conditionFile (expected3, sr, o3, rep);
+            check (identical (preview.getProcessed()->buffer, expected3), "it reflects the last setting only");
+
+            // nothing in stage A: no copy at all
+            ConditionOptions o4;
+            o4.normalize = NormalizeMode::peak;
+            preview.setOptions (o4);
+            check (pump ([&] { return preview.getProcessed() != nullptr; }, 5000) && preview.getProcessed() == audioPtr, "when stage A has nothing to do the original is used as it is (no copy)");
+
+            preview.releaseProcessed();
+            check (preview.getProcessed() == nullptr && changes > 0, "the copy can be dropped again");
+        }
+
+        // ---- player: another version of the same recording can be swapped in, anything else is refused
+        {
+            const auto make = [] (int samples, int channels) {
+                auto d = std::make_shared<AudioData>();
+                d->sampleRate = 48000.0;
+                d->buffer.setSize (channels, samples);
+                d->buffer.clear();
+                return AudioDataPtr (d);
+            };
+            PlaybackEngine engine;
+            engine.setAudio (make (48000, 2));
+            check (engine.swapAudio (make (48000, 2)), "a conditioned version of the same length can be swapped in");
+            check (! engine.swapAudio (make (47999, 2)) && ! engine.swapAudio (make (48000, 1)) && ! engine.swapAudio (nullptr),
+                   "a different length, channel count or nothing is refused (the play range would not fit)");
+        }
+
+        // ---- the main window keeps the settings
+        {
+            const double sr = 48000.0;
+            auto source = std::make_shared<AudioData>();
+            source->sampleRate = sr;
+            source->bitsPerSample = 24;
+            source->buffer.setSize (1, (int) (sr * 3));
+            juce::Random rnd (51);
+            for (int i = 0; i < source->buffer.getNumSamples(); ++i)
+                source->buffer.setSample (0, i, (float) ((rnd.nextFloat() - 0.5) * 0.004 + 0.01 * std::sin (2.0 * pi * 60.0 * i / sr)
+                                                         + 0.006 * std::sin (2.0 * pi * 120.0 * i / sr) + 0.004 * std::sin (2.0 * pi * 180.0 * i / sr)));
+
+            ConditionSettings wanted;
+            wanted.preset = ConditionPreset::standard;
+            wanted.options = presetOptions (ConditionPreset::standard);
+            wanted.previewGain = true;
+
+            {
+                MainComponent main;
+                main.testLoadAudio (source);
+                check (main.testConditioning() == ConditionSettings {}, "a fresh start has conditioning off");
+                main.testSetConditioning (wanted);
+                for (int t = 0; t < 10000 && main.testHumStatus().contains ("..."); t += 50)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+                check (main.testHumStatus().contains ("60 Hz"), "the panel can say which hum was found");
+                check (main.testSummary().contains ("Peak -1.0 dBFS"), "the export dialog's summary names what will be applied");
+                main.testSaveNow();
+            }
+
+            MainComponent again;
+            check (again.testConditioning() == wanted, "the settings are there after a restart (shared preferences)");
         }
 
         // ---- exporter

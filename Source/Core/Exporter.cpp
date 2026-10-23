@@ -50,12 +50,7 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
         for (int ch = 0; ch < channels; ++ch)
             segment.copyFrom (ch, 0, *source, ch, (int) start, length);
 
-        const auto f = juce::jmin (fade, length / 2);
-        if (f > 0)
-        {
-            segment.applyGainRamp (0, f, 0.0f, 1.0f);
-            segment.applyGainRamp (length - f, f, 1.0f, 0.0f);
-        }
+        applyEdgeFade (segment, fade);
 
         ConditionReport report;
         conditionCycle (segment, audio.sampleRate, conditioning, report);

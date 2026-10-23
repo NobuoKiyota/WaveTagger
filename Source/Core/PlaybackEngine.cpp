@@ -31,6 +31,17 @@ void PlaybackEngine::setAudio (AudioDataPtr audio)
         resampler.setResamplingRatio (audio->sampleRate / deviceRate.load());
 }
 
+bool PlaybackEngine::swapAudio (AudioDataPtr audio)
+{
+    const juce::SpinLock::ScopedLockType sl (source.lock);
+    if (audio == nullptr || source.audio == nullptr || audio->getNumSamples() != source.audio->getNumSamples()
+        || audio->getNumChannels() != source.audio->getNumChannels())
+        return false;
+
+    source.audio = std::move (audio);
+    return true;
+}
+
 void PlaybackEngine::play (juce::int64 start, juce::int64 end, bool loop)
 {
     juce::int64 total = 0;
@@ -125,6 +136,13 @@ void PlaybackEngine::BufferSource::getNextAudioBlock (const juce::AudioSourceCha
     }
 
     position = pos;
+
+    const auto targetGain = gain.load();
+    if (targetGain != appliedGain || targetGain != 1.0f)
+    {
+        info.buffer->applyGainRamp (info.startSample, n, appliedGain, targetGain);
+        appliedGain = targetGain;
+    }
 
     if (justStarted.exchange (false))
     {
