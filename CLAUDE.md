@@ -37,3 +37,11 @@
 - 検証: `--selftest-inbox` (22) / `--selftest-watcher` (9, 実スレッド) / `--selftest-organize` (28) / `--selftest-prefs` (21)。画面確認: `--snapshot-inbox` / `--snapshot-organizer`
 - `JUCE_MODAL_LOOPS_PERMITTED=1` は自己テストがメッセージループを手動で回すためだけに有効化
 - JSON の `getArray()` は、一時的な `var` に対して呼ぶとダングリングポインタになる (`readJson(f).getArray()` は不可。いったん変数に受ける)
+
+## 綴り揺れ・重複のチェック (Organizer の「チェック」タブ, `Core/Checks`)
+- **綴り揺れ** (`findSimilarNames`, 索引の名前のみ): 1 文字違い (隣り合う文字の入れ替えも 1 回) の名前を、多く使われている綴りを中心にまとめる。**番号・英字ラベルのシリーズ (SynthA-D, Eliot 1-7 V, Piano a-o) はタイプミスではないので除外**。感度は Strict ⊂ Normal ⊂ Loose (Normal は 6 文字以上で 1 回、10 文字以上で 2 回)。並びは「多い綴りに対して少数派が極端に少ない組」が上 = タイプミスらしい順。「別の名前として扱う」は `spelling_ignore.json` (設定フォルダ)
+- **完全一致の重複** (`findExactDuplicates`): 索引全体から サイズ → 先頭/末尾 64KB → 全体のハッシュ の順に絞る。ハッシュは `hashes.bin` (PC ごと, 追記型) に保存し再開可能、中止可
+- **似た音の重複** (`findNearDuplicates`): 選んだフォルダ内で、長さと特徴量がほぼ同じ (形式・ビット深度・前後の無音だけの違い)
+- 実ライブラリ (`G:\SE` 約 9 万件 / 名前 37,273 種) での目安: Normal 約 4 秒、Loose 約 23 秒。サイズが同じファイルは 9,679 組 / 53,096 件 (段階 1 の読み込み約 6.6GB)。`--report-checks` で読み取り専用の報告を出せる (`WT_APPDATA` 必須)
+- 旧ライブラリ (Cubase 参照) のファイルは、ここでは名前変更も削除もしない。一覧・Excel 書き出し・場所を開く、だけ
+- 検証: `--selftest-checks` (19 項目)

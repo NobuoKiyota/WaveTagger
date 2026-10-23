@@ -1069,6 +1069,7 @@ void MainComponent::showOrganizer()
             organizedDir = dir;
             scheduleSave();
         };
+        hooks.getIndex = [this] { return libraryIndex.getData(); };
         organizerWindow = std::make_unique<OrganizerWindow> (catalog, featureStore, formats, hooks);
     }
 

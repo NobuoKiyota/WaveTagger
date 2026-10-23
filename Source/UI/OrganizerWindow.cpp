@@ -1,6 +1,7 @@
 #include "OrganizerWindow.h"
 #include "CategoryPicker.h"
 #include "Core/AudioData.h"
+#include "Core/Persistence.h"
 #include "Core/Xlsx.h"
 #include "Theme.h"
 #include "Util/Text.h"
@@ -140,6 +141,52 @@ private:
     OrganizerPanel& owner;
 };
 
+class OrganizerPanel::CheckModel : public juce::TableListBoxModel
+{
+public:
+    explicit CheckModel (OrganizerPanel& o) : owner (o) {}
+
+    int getNumRows() override { return (int) owner.checkRows.size(); }
+
+    void paintRowBackground (juce::Graphics& g, int row, int, int, bool selected) override
+    {
+        const auto shade = row < getNumRows() ? owner.checkRows[(size_t) row].group % 2 : 0;
+        g.fillAll (selected ? theme::accent.withAlpha (0.32f) : (shade == 0 ? theme::background : theme::background.brighter (0.05f)));
+    }
+
+    void paintCell (juce::Graphics& g, int row, int column, int width, int height, bool) override
+    {
+        if (row >= getNumRows())
+            return;
+
+        const auto& r = owner.checkRows[(size_t) row];
+        juce::String text;
+        auto colour = theme::text;
+        switch (column)
+        {
+            case 1: text = juce::String (r.group); colour = theme::textDim; break;
+            case 2: text = r.kind; colour = theme::textDim; break;
+            case 3: text = r.name; break;
+            case 4: text = r.detail; colour = theme::textDim; break;
+            case 5: text = r.location; colour = theme::textDim; break;
+            default: return;
+        }
+
+        g.setColour (colour);
+        g.setFont (juce::FontOptions ("Meiryo UI", 13.0f, juce::Font::plain));
+        g.drawText (text, 6, 0, width - 10, height, juce::Justification::centredLeft, true);
+    }
+
+    void cellDoubleClicked (int row, int, const juce::MouseEvent&) override
+    {
+        if (row >= 0 && row < getNumRows() && owner.checkRows[(size_t) row].file != juce::File())
+            owner.checkRows[(size_t) row].file.revealToUser();
+    }
+
+private:
+    OrganizerPanel& owner;
+};
+
 //==============================================================================
 OrganizerPanel::OrganizerPanel (Catalog& c, FeatureStore& s, juce::AudioFormatManager& f, OrganizerHooks h)
     : catalog (c), store (s), formats (f), hooks (std::move (h))
@@ -171,6 +218,8 @@ OrganizerPanel::OrganizerPanel (Catalog& c, FeatureStore& s, juce::AudioFormatMa
 
     groupingTab = std::make_unique<LayoutTab>();
     outputTab = std::make_unique<LayoutTab>();
+    checkTab = std::make_unique<LayoutTab>();
+    hashStore.load();
 
     // ---- grouping tab widgets
     folderButton.setButtonText (WT_U8 ("フォルダを選ぶ..."));
@@ -328,9 +377,87 @@ OrganizerPanel::OrganizerPanel (Catalog& c, FeatureStore& s, juce::AudioFormatMa
         planText.setBounds (r);
     };
 
+
+    // ---- checks tab
+    checkModel = std::make_unique<CheckModel> (*this);
+    checkTable.setModel (checkModel.get());
+    checkTable.setRowHeight (24);
+    checkTable.setColour (juce::ListBox::backgroundColourId, theme::background);
+    checkTable.setColour (juce::ListBox::outlineColourId, theme::outline);
+    checkTable.setOutlineThickness (1);
+    auto& checkHeader = checkTable.getHeader();
+    checkHeader.setColour (juce::TableHeaderComponent::backgroundColourId, theme::panel);
+    checkHeader.setColour (juce::TableHeaderComponent::textColourId, theme::textDim);
+    checkHeader.addColumn (WT_U8 ("組"), 1, 44, 36, 70, juce::TableHeaderComponent::notSortable);
+    checkHeader.addColumn (WT_U8 ("種類"), 2, 90, 70, 150, juce::TableHeaderComponent::notSortable);
+    checkHeader.addColumn (WT_U8 ("名前 / ファイル"), 3, 300, 120, 700, juce::TableHeaderComponent::notSortable);
+    checkHeader.addColumn (WT_U8 ("件数 / サイズ"), 4, 100, 70, 200, juce::TableHeaderComponent::notSortable);
+    checkHeader.addColumn (WT_U8 ("場所"), 5, 480, 150, 1200, juce::TableHeaderComponent::notSortable);
+    checkHeader.setStretchToFitActive (true);
+
+    sensitivityBox.addItem (WT_U8 ("感度: 厳しい (1 文字違い)"), 1);
+    sensitivityBox.addItem (WT_U8 ("感度: 標準"), 2);
+    sensitivityBox.addItem (WT_U8 ("感度: ゆるい (似た名前も)"), 3);
+    sensitivityBox.setSelectedId (2, juce::dontSendNotification);
+    spellingButton.setButtonText (WT_U8 ("綴り揺れを検出 (ライブラリ全体)"));
+    exactButton.setButtonText (WT_U8 ("完全一致の重複を検出 (ライブラリ全体)"));
+    nearButton.setButtonText (WT_U8 ("似た音の重複 (「グループ分け」で選んだフォルダ)"));
+    cancelCheckButton.setButtonText (WT_U8 ("中止"));
+    revealCheckButton.setButtonText (WT_U8 ("場所を開く"));
+    ignoreButton.setButtonText (WT_U8 ("この組は別の名前として扱う"));
+    exportCheckButton.setButtonText (WT_U8 ("Excel に書き出し"));
+    checkStatus.setColour (juce::Label::textColourId, theme::textDim);
+    checkStatus.setText (WT_U8 ("綴り揺れ: 似ているが違う名前を探します。重複: 内容が同じファイルを探します。元のファイルは変更しません (旧ライブラリは Cubase が参照しているため、名前の修正や削除は、ここでは行いません)。"), juce::dontSendNotification);
+
+    for (auto* comp : std::initializer_list<juce::Component*> { &checkTable, &sensitivityBox, &spellingButton, &exactButton, &nearButton, &cancelCheckButton,
+                                                                &revealCheckButton, &ignoreButton, &exportCheckButton, &checkStatus })
+        checkTab->addAndMakeVisible (comp);
+
+    spellingButton.onClick = [this] { runSpellingCheck(); };
+    exactButton.onClick = [this] { runExactCheck(); };
+    nearButton.onClick = [this] { runNearCheck(); };
+    cancelCheckButton.onClick = [this] { cancelCheck = true; };
+    revealCheckButton.onClick = [this] {
+        if (const auto* r = selectedCheckRow(); r != nullptr && r->file != juce::File())
+            r->file.revealToUser();
+    };
+    ignoreButton.onClick = [this] { ignoreSelectedSpelling(); };
+    exportCheckButton.onClick = [this] { exportChecks(); };
+
+    checkTab->layout = [this] {
+        auto r = checkTab->getLocalBounds().reduced (12, 10);
+        checkStatus.setBounds (r.removeFromTop (44));
+        r.removeFromTop (4);
+
+        auto row = r.removeFromTop (30);
+        sensitivityBox.setBounds (row.removeFromLeft (220));
+        row.removeFromLeft (8);
+        spellingButton.setBounds (row.removeFromLeft (230));
+        row.removeFromLeft (8);
+        exactButton.setBounds (row.removeFromLeft (290));
+
+        r.removeFromTop (6);
+        row = r.removeFromTop (30);
+        nearButton.setBounds (row.removeFromLeft (370));
+        row.removeFromLeft (8);
+        cancelCheckButton.setBounds (row.removeFromLeft (70));
+
+        auto bottom = r.removeFromBottom (30);
+        r.removeFromBottom (6);
+        revealCheckButton.setBounds (bottom.removeFromLeft (110));
+        bottom.removeFromLeft (6);
+        ignoreButton.setBounds (bottom.removeFromLeft (230));
+        bottom.removeFromLeft (6);
+        exportCheckButton.setBounds (bottom.removeFromLeft (170));
+
+        r.removeFromTop (8);
+        checkTable.setBounds (r);
+    };
+
     tabs.setTabBarDepth (32);
     tabs.addTab (WT_U8 ("グループ分け"), theme::panel, groupingTab.get(), false);
     tabs.addTab (WT_U8 ("整理ビュー (ハードリンク)"), theme::panel, outputTab.get(), false);
+    tabs.addTab (WT_U8 ("チェック (綴り揺れ・重複)"), theme::panel, checkTab.get(), false);
     tabs.setColour (juce::TabbedComponent::backgroundColourId, theme::panel);
     addAndMakeVisible (tabs);
 
@@ -346,8 +473,11 @@ OrganizerPanel::~OrganizerPanel()
     stopTimer();
     tabs.clearTabs(); // the tab bodies are owned by this panel, so detach them before they are destroyed
     analyzer.cancel();
+    cancelCheck = true;
+    checkJobs.removeAllJobs (true, 30000);
     groupsList.setModel (nullptr);
     filesTable.setModel (nullptr);
+    checkTable.setModel (nullptr);
     jobs.removeAllJobs (true, 20000);
 }
 
@@ -365,6 +495,9 @@ void OrganizerPanel::timerCallback()
 {
     if (analyzer.isRunning())
         updateStatus();
+
+    if (checkRunning)
+        checkStatus.setText (WT_U8 ("検査中... ") + juce::String (checkDone.load()) + " / " + juce::String (checkTotal.load()) + WT_U8 ("  (「中止」でやめられます)"), juce::dontSendNotification);
 }
 
 //==============================================================================
@@ -774,6 +907,256 @@ void OrganizerPanel::runDemo (const juce::File& dir, const juce::String& cat, co
     }
     filesTable.selectRow (0);
     previewPlan();
+
+    if (const auto tab = juce::SystemStats::getEnvironmentVariable ("WT_DEMO_TAB", {}); tab.getIntValue() == 2)
+    {
+        // sample rows, so the Checks tab can be looked at without scanning a real library
+        const auto row = [] (int g, const char* kind, const char* name, const char* detail, const char* where) {
+            CheckRow r;
+            r.group = g;
+            r.kind = juce::String::fromUTF8 (kind);
+            r.name = name;
+            r.detail = juce::String::fromUTF8 (detail);
+            r.location = juce::String::fromUTF8 (where);
+            return r;
+        };
+        checkRows = { row (1, "★ 多い綴り", "ImpactSound", "29 件", "G:\\SE\\Rec261020\\ImpactSound"),
+                      row (1, "綴り揺れ", "ImpactSoun", "1 件", "G:\\SE\\Old\\Hits"),
+                      row (2, "★ 多い綴り", "MaskingTape", "5 件", "G:\\SE\\Rec261020\\MaskingTape"),
+                      row (2, "綴り揺れ", "MasicTape", "13 件", "G:\\SE\\Rec261020\\MasicTape"),
+                      row (3, "完全一致", "HeavyRain.wav", "18,420 KB", "D:\\pcm録音"),
+                      row (3, "完全一致", "HeavyRain1.wav", "18,420 KB", "D:\\pcm録音"),
+                      row (3, "完全一致", "HeavyRain_backup.wav", "18,420 KB", "G:\\SE\\Ambience") };
+        checkTable.updateContent();
+        checkStatus.setText (WT_U8 ("(表示例) 2 組の綴り揺れと、1 組の完全一致の重複。★ は一番多く使われている綴り(おそらく正しい方)です。"), juce::dontSendNotification);
+        tabs.setCurrentTabIndex (2);
+    }
+}
+
+//==============================================================================
+// Checks: spelling variants and duplicates
+//==============================================================================
+juce::File OrganizerPanel::ignoreFile() const
+{
+    return catalog.getDirectory().getChildFile ("spelling_ignore.json");
+}
+
+const OrganizerPanel::CheckRow* OrganizerPanel::selectedCheckRow() const
+{
+    const auto row = checkTable.getSelectedRow();
+    return row >= 0 && row < (int) checkRows.size() ? &checkRows[(size_t) row] : nullptr;
+}
+
+void OrganizerPanel::finishCheck (std::vector<CheckRow> rows, const juce::String& message)
+{
+    checkRunning = false;
+    checkRows = std::move (rows);
+    checkTable.updateContent();
+    checkTable.repaint();
+    checkStatus.setText (message, juce::dontSendNotification);
+    for (auto* b : { &spellingButton, &exactButton, &nearButton })
+        b->setEnabled (true);
+}
+
+void OrganizerPanel::runSpellingCheck()
+{
+    const auto index = hooks.getIndex ? hooks.getIndex() : nullptr;
+    if (index == nullptr || index->entries.empty() || checkRunning)
+    {
+        checkStatus.setText (WT_U8 ("ライブラリの索引がまだありません。先に「Library」の検索ウィンドウでスキャンを終えてください。"), juce::dontSendNotification);
+        return;
+    }
+
+    juce::StringArray ignored;
+    const auto json = readJson (ignoreFile()); // keep the parsed value alive while its array is used
+    if (const auto* arr = json.getArray())
+        for (const auto& v : *arr)
+            ignored.add (v.toString());
+
+    const auto sensitivity = sensitivityBox.getSelectedId() == 1 ? NameSensitivity::Strict : sensitivityBox.getSelectedId() == 3 ? NameSensitivity::Loose : NameSensitivity::Normal;
+
+    for (auto* b : { &spellingButton, &exactButton, &nearButton })
+        b->setEnabled (false);
+    cancelCheck = false;
+    checkRunning = true;
+    checkDone = 0;
+    checkTotal = 0;
+    checkStatus.setText (WT_U8 ("綴り揺れを検出中... (ライブラリの規模により数秒〜数十秒)"), juce::dontSendNotification);
+
+    juce::Component::SafePointer<OrganizerPanel> safe (this);
+    checkJobs.addJob ([safe, index, sensitivity, ignored] {
+        const auto groups = findSimilarNames (*index, sensitivity, ignored);
+
+        juce::MessageManager::callAsync ([safe, groups] {
+            if (safe == nullptr)
+                return;
+
+            std::vector<CheckRow> rows;
+            int n = 0;
+            for (const auto& g : groups)
+            {
+                ++n;
+                juce::StringArray keys;
+                for (const auto& v : g.variants)
+                    keys.add (v.key);
+
+                for (size_t i = 0; i < g.variants.size(); ++i)
+                {
+                    const auto& v = g.variants[i];
+                    CheckRow r;
+                    r.group = n;
+                    r.kind = i == 0 ? WT_U8 ("★ 多い綴り") : WT_U8 ("綴り揺れ");
+                    r.name = v.display;
+                    r.detail = juce::String (v.count) + WT_U8 (" 件");
+                    r.location = v.example.getParentDirectory().getFullPathName();
+                    r.file = v.example;
+                    r.groupKeys = keys;
+                    rows.push_back (r);
+                }
+            }
+
+            safe->finishCheck (std::move (rows),
+                               groups.empty() ? WT_U8 ("似ているが違う名前は見つかりませんでした。")
+                                              : juce::String ((int) groups.size()) + WT_U8 (" 組。上にあるほど、タイプミスの可能性が高い組です (多い綴りに対して、少数派が極端に少ない)。★ は一番多く使われている綴り。"
+                                                                                                "別物なら「この組は別の名前として扱う」で、次回から出しません。"));
+        });
+    });
+}
+
+void OrganizerPanel::runExactCheck()
+{
+    const auto index = hooks.getIndex ? hooks.getIndex() : nullptr;
+    if (index == nullptr || index->entries.empty() || checkRunning)
+    {
+        checkStatus.setText (WT_U8 ("ライブラリの索引がまだありません。先に「Library」の検索ウィンドウでスキャンを終えてください。"), juce::dontSendNotification);
+        return;
+    }
+
+    for (auto* b : { &spellingButton, &exactButton, &nearButton })
+        b->setEnabled (false);
+    cancelCheck = false;
+    checkRunning = true;
+    checkDone = 0;
+    checkTotal = 0;
+
+    juce::Component::SafePointer<OrganizerPanel> safe (this);
+    checkJobs.addJob ([this, safe, index] {
+        const auto groups = findExactDuplicates (*index, hashStore, [this] (int done, int total) {
+            checkDone = done;
+            checkTotal = total;
+            return ! cancelCheck.load();
+        });
+        const auto wasCancelled = cancelCheck.load();
+
+        juce::MessageManager::callAsync ([safe, groups, wasCancelled] {
+            if (safe == nullptr)
+                return;
+
+            std::vector<CheckRow> rows;
+            juce::int64 wasted = 0;
+            int n = 0;
+            for (const auto& g : groups)
+            {
+                ++n;
+                wasted += g.size * (juce::int64) (g.files.size() - 1);
+                for (const auto& f : g.files)
+                {
+                    CheckRow r;
+                    r.group = n;
+                    r.kind = WT_U8 ("完全一致");
+                    r.name = f.getFileName();
+                    r.detail = juce::String ((double) g.size / 1024.0, g.size > 1024 * 1024 ? 0 : 1) + " KB";
+                    r.location = f.getParentDirectory().getFullPathName();
+                    r.file = f;
+                    rows.push_back (r);
+                }
+            }
+
+            safe->finishCheck (std::move (rows),
+                               wasCancelled ? WT_U8 ("中止しました (そこまでの結果は保存されており、次回は続きから進みます)。")
+                               : groups.empty() ? WT_U8 ("内容が完全に同じファイルは見つかりませんでした。")
+                                                : juce::String ((int) groups.size()) + WT_U8 (" 組の重複 (内容が完全に同じ)。重複分の合計は約 ")
+                                                      + juce::String ((double) wasted / (1024.0 * 1024.0), 1) + " MB。");
+        });
+    });
+}
+
+void OrganizerPanel::runNearCheck()
+{
+    if (files.empty() || checkRunning)
+    {
+        checkStatus.setText (WT_U8 ("先に「グループ分け」タブでフォルダを選び、「① 音を解析」を実行してください。"), juce::dontSendNotification);
+        return;
+    }
+
+    const auto groups = findNearDuplicates (files, store);
+    std::vector<CheckRow> rows;
+    int n = 0;
+    for (const auto& g : groups)
+    {
+        ++n;
+        for (const auto& f : g.files)
+        {
+            CheckRow r;
+            r.group = n;
+            r.kind = WT_U8 ("似た音");
+            r.name = f.getFileName();
+            r.detail = juce::String ((double) f.getSize() / 1024.0, 0) + " KB";
+            r.location = f.getParentDirectory().getFullPathName();
+            r.file = f;
+            rows.push_back (r);
+        }
+    }
+
+    finishCheck (std::move (rows), groups.empty() ? WT_U8 ("このフォルダに、長さと音色がほぼ同じ組は見つかりませんでした。")
+                                                  : juce::String ((int) groups.size()) + WT_U8 (" 組の似た音 (形式・ビット深度・前後の無音が違うだけの可能性があります)。聴き比べて確認してください。"));
+}
+
+void OrganizerPanel::ignoreSelectedSpelling()
+{
+    const auto* row = selectedCheckRow();
+    if (row == nullptr || row->groupKeys.size() < 2)
+        return;
+
+    juce::StringArray ignored;
+    const auto json = readJson (ignoreFile());
+    if (const auto* arr = json.getArray())
+        for (const auto& v : *arr)
+            ignored.add (v.toString());
+
+    for (int i = 0; i < row->groupKeys.size(); ++i)
+        for (int j = i + 1; j < row->groupKeys.size(); ++j)
+            ignored.addIfNotAlreadyThere (ignoreKey (row->groupKeys[i], row->groupKeys[j]));
+
+    juce::Array<juce::var> out;
+    for (const auto& k : ignored)
+        out.add (k);
+    writeJson (ignoreFile(), out);
+
+    const auto group = row->group;
+    checkRows.erase (std::remove_if (checkRows.begin(), checkRows.end(), [group] (const CheckRow& r) { return r.group == group; }), checkRows.end());
+    checkTable.updateContent();
+    checkTable.repaint();
+    checkStatus.setText (WT_U8 ("この組を、別の名前として記録しました。次回の検出には出ません。"), juce::dontSendNotification);
+}
+
+void OrganizerPanel::exportChecks()
+{
+    std::vector<juce::StringArray> rows { { "Group", "Kind", "Name", "Detail", "Location" } };
+    for (const auto& r : checkRows)
+        rows.push_back ({ juce::String (r.group), r.kind, r.name, r.detail, r.location });
+
+    const auto file = catalog.getDirectory().getChildFile ("checks.xlsx");
+    juce::String error;
+    if (xlsx::write (file, { { "Checks", rows } }, error))
+    {
+        checkStatus.setText (WT_U8 ("書き出しました: ") + file.getFullPathName(), juce::dontSendNotification);
+        file.revealToUser();
+    }
+    else
+    {
+        checkStatus.setText (WT_U8 ("書き出せませんでした: ") + error, juce::dontSendNotification);
+    }
 }
 
 //==============================================================================

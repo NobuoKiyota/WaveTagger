@@ -1,6 +1,7 @@
 #include "Core/Catalog.h"
 #include "Core/TextDecode.h"
 #include "Core/EmbeddedState.h"
+#include "Core/Checks.h"
 #include "Core/Clustering.h"
 #include "Core/FeatureStore.h"
 #include "Core/HardLinks.h"
@@ -57,7 +58,7 @@ public:
         auto toFile = [] (const juce::String& s) { return juce::File::getCurrentWorkingDirectory().getChildFile (s.unquoted()); };
 
         // Automated visual checks must never touch the real settings / CSV folder
-        const auto isSnapshotMode = args.size() >= 1 && (args[0].startsWith ("--snapshot") || args[0].startsWith ("--selftest"));
+        const auto isSnapshotMode = args.size() >= 1 && (args[0].startsWith ("--snapshot") || args[0].startsWith ("--selftest") || args[0].startsWith ("--report"));
         if (isSnapshotMode && juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}).isEmpty())
         {
             std::fprintf (stderr, "snapshot modes require the WT_APPDATA environment variable\n");
@@ -67,7 +68,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -75,6 +76,8 @@ public:
                                         : args[0] == "--selftest-inbox" ? selfTestInbox()
                                         : args[0] == "--selftest-watcher" ? selfTestWatcher()
                                         : args[0] == "--selftest-organize" ? selfTestOrganize()
+                                        : args[0] == "--selftest-checks" ? selfTestChecks()
+                                        : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
             quit();
             return;
@@ -1137,6 +1140,274 @@ private:
             check (! view.getChildFile ("TOOLS").exists() && ! view.getChildFile ("PAPER").exists(), "folders that became empty are removed");
         }
         return ok;
+    }
+
+    /** Spelling variants and duplicates: what must be found, and what must NOT be. */
+    bool selfTestChecks()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        const auto base = testRoot.getChildFile ("checks_test");
+        base.deleteRecursively();
+
+        const auto scan = [] (LibraryIndex& index, const juce::File& root) {
+            index.setRoots (juce::StringArray { root.getFullPathName() });
+            index.rescan();
+            for (int i = 0; i < 300 && index.isScanning(); ++i)
+                juce::Thread::sleep (50);
+            juce::Thread::sleep (100);
+            return index.getData();
+        };
+
+        // ---- spelling variants
+        const auto names = base.getChildFile ("names");
+        names.createDirectory();
+        const auto make = [&] (const juce::String& stem, int count) {
+            for (int i = 1; i <= count; ++i)
+                names.getChildFile (stem + "_" + juce::String (i).paddedLeft ('0', 2) + ".wav").replaceWithText ("x");
+        };
+        make ("MasicTape", 13);
+        make ("MaskingTape", 5);
+        make ("ImpactSound", 9);
+        make ("ImpactSoun", 1);
+        make ("Door_Open", 3);
+        make ("Door_Opne", 1);
+        make ("Rain_Heavy", 2);
+        make ("RainHeavy", 1);
+        make ("Whoosh", 4);
+        make ("Whoosh_B", 3);
+        make ("Zap", 2);
+        make ("Funky", 3);
+        make ("Fonky", 1);
+        make ("SynthA", 4);
+        make ("SynthB", 3);
+        make ("SynthC", 2);
+        make ("SynthD", 1);
+        make ("Synth", 5);
+        make ("Piano", 6);
+        make ("Pianoa", 2);
+        make ("Pianob", 2);
+        make ("Pianoc", 2);
+        make ("Eliot_1_V", 3);
+        make ("Eliot_2_V", 3);
+        make ("Eliot_3_V", 3);
+
+        LibraryIndex nameIndex;
+        const auto data = scan (nameIndex, names);
+
+        const auto hasGroup = [] (const std::vector<NameGroup>& groups, const juce::String& a, const juce::String& b) {
+            for (const auto& g : groups)
+            {
+                bool hasA = false, hasB = false;
+                for (const auto& v : g.variants)
+                {
+                    hasA = hasA || v.display == a;
+                    hasB = hasB || v.display == b;
+                }
+                if (hasA && hasB)
+                    return true;
+            }
+            return false;
+        };
+
+        const auto normal = findSimilarNames (*data, NameSensitivity::Normal);
+        check (normal.size() == 3, "normal sensitivity finds exactly three groups (series and short names excluded)");
+        check (hasGroup (normal, "ImpactSound", "ImpactSoun") && hasGroup (normal, "Door_Open", "Door_Opne") && hasGroup (normal, "Rain_Heavy", "RainHeavy"),
+               "ImpactSoun, Door_Opne (swapped letters) and RainHeavy (missing underscore) are caught");
+        bool commonFirst = true;
+        for (const auto& g : normal)
+            commonFirst = commonFirst && g.variants[0].count > g.variants[1].count;
+        check (commonFirst && normal[0].variants[0].display == "ImpactSound" && normal[0].variants[0].count == 9, "the most-used spelling is listed first as the likely correct one");
+        check (! hasGroup (normal, "Whoosh", "Whoosh_B") && ! hasGroup (normal, "MasicTape", "MaskingTape"), "genuinely different names (Whoosh / Whoosh_B) are not flagged");
+        check (normal[0].variants[0].example.existsAsFile(), "each variant carries an example file to look at");
+
+        const auto strict = findSimilarNames (*data, NameSensitivity::Strict);
+        const auto loose = findSimilarNames (*data, NameSensitivity::Loose);
+        check (strict.size() <= normal.size() && normal.size() <= loose.size() && hasGroup (strict, "ImpactSound", "ImpactSoun"),
+               "strict reports a subset of normal, which reports a subset of loose");
+        check (hasGroup (loose, "MasicTape", "MaskingTape") && hasGroup (loose, "Whoosh", "Whoosh_B") && hasGroup (loose, "Funky", "Fonky"),
+               "loose also reports MasicTape / MaskingTape, Whoosh / Whoosh_B and the short Funky / Fonky");
+        check (! hasGroup (normal, "Funky", "Fonky"), "short names (5 letters) are not flagged unless loose: they are often different words");
+        bool seriesFlagged = false;
+        for (const auto& g : normal)
+            for (const auto& v : g.variants)
+                seriesFlagged = seriesFlagged || v.display.startsWith ("SynthA") || v.display.startsWith ("SynthB") || v.display.startsWith ("Pianoa")
+                                || v.display.startsWith ("Pianob") || v.display.startsWith ("Eliot_");
+        check (! seriesFlagged, "lettered / numbered series (SynthA-D, Pianoa-c, Eliot_1_V ...) are not reported as typos");
+        const auto skipped = findSimilarNames (*data, NameSensitivity::Normal, { ignoreKey ("impactsoun", "impactsound") });
+        check (skipped.size() == 2 && ! hasGroup (skipped, "ImpactSound", "ImpactSoun"), "a pair marked as 'different names' is no longer reported");
+        check (ignoreKey ("b", "a") == ignoreKey ("a", "b"), "the ignore key does not depend on order");
+
+        // ---- exact duplicates
+        const auto dupes = base.getChildFile ("dupes");
+        dupes.getChildFile ("sub").createDirectory();
+        const auto randomBytes = [] (int seed, int n) {
+            juce::Random rnd (seed);
+            juce::MemoryBlock b ((size_t) n);
+            for (int i = 0; i < n; ++i)
+                static_cast<juce::uint8*> (b.getData())[i] = (juce::uint8) rnd.nextInt (256);
+            return b;
+        };
+        const auto put = [] (const juce::File& f, const juce::MemoryBlock& b) { f.replaceWithData (b.getData(), b.getSize()); };
+
+        const auto a = randomBytes (1, 5000);
+        put (dupes.getChildFile ("A.wav"), a);
+        put (dupes.getChildFile ("A_copy.wav"), a);
+        put (dupes.getChildFile ("sub/A_again.wav"), a);
+        put (dupes.getChildFile ("B.wav"), randomBytes (2, 5000));   // same size as A, different content
+        put (dupes.getChildFile ("C.wav"), randomBytes (3, 3000));
+        put (dupes.getChildFile ("D.wav"), randomBytes (4, 3000));   // same size as C, different content
+        put (dupes.getChildFile ("Unique.wav"), randomBytes (5, 777));
+
+        auto big = randomBytes (6, 300 * 1024);
+        put (dupes.getChildFile ("E.wav"), big);
+        put (dupes.getChildFile ("G.wav"), big);                       // identical copy of E
+        auto almost = big;                                             // same first and last 64 KB, different middle
+        static_cast<juce::uint8*> (almost.getData())[150 * 1024] ^= 0x5A;
+        put (dupes.getChildFile ("F.wav"), almost);
+
+        LibraryIndex dupIndex;
+        auto dupData = scan (dupIndex, dupes);
+        HashStore hashes (base.getChildFile ("hashes.bin"));
+        hashes.load();
+
+        const auto groups = findExactDuplicates (*dupData, hashes);
+        const auto nameSet = [] (const DuplicateGroup& g) {
+            std::set<juce::String> s;
+            for (const auto& f : g.files)
+                s.insert (f.getFileName());
+            return s;
+        };
+        std::set<std::set<juce::String>> found;
+        for (const auto& g : groups)
+            found.insert (nameSet (g));
+
+        check (groups.size() == 2 && found.count ({ "A.wav", "A_copy.wav", "A_again.wav" }) == 1 && found.count ({ "E.wav", "G.wav" }) == 1,
+               "exactly the two real duplicate sets are found (A x3, E x2), across sub-folders");
+        check (found.count ({ "E.wav", "F.wav", "G.wav" }) == 0 && found.count ({ "B.wav", "A.wav" }) == 0 && found.count ({ "C.wav", "D.wav" }) == 0,
+               "same size, or same ends but a different middle, is NOT reported as a duplicate");
+        check (hashes.hashesComputed() > 0, "hashes were computed on the first run");
+
+        HashStore again (base.getChildFile ("hashes.bin"));
+        again.load();
+        const auto rerun = findExactDuplicates (*dupData, again);
+        check (rerun.size() == 2 && again.hashesComputed() == 0, "a second run reads nothing: all hashes come from the saved store");
+
+        // a file that changes (same size, new content) is hashed again and drops out of its group
+        put (dupes.getChildFile ("A_copy.wav"), randomBytes (99, 5000));
+        juce::Thread::sleep (1100);
+        dupData = scan (dupIndex, dupes);
+        const auto afterEdit = findExactDuplicates (*dupData, again);
+        std::set<std::set<juce::String>> found2;
+        for (const auto& g : afterEdit)
+            found2.insert (nameSet (g));
+        check (again.hashesComputed() >= 1 && found2.count ({ "A.wav", "A_again.wav" }) == 1 && found2.count ({ "A.wav", "A_copy.wav", "A_again.wav" }) == 0,
+               "an edited file is re-hashed and leaves its duplicate set");
+
+        int calls = 0;
+        const auto cancelled = findExactDuplicates (*dupData, hashes, [&calls] (int, int) { return ++calls < 3; });
+        check (cancelled.size() <= 2, "a run can be cancelled from the progress callback");
+
+        // ---- near duplicates: the same sound stored differently
+        const auto tones = base.getChildFile ("tones");
+        tones.createDirectory();
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        const auto tone = [] (double freq, int samples) {
+            juce::AudioBuffer<float> b (1, samples);
+            for (int i = 0; i < samples; ++i)
+                b.setSample (0, i, i < 44100 ? 0.4f * (float) std::sin (6.2831853 * freq * i / 44100.0) : 0.0f);
+            return b;
+        };
+        const auto save = [&] (const juce::File& f, const juce::AudioBuffer<float>& b, bool flac) {
+            std::unique_ptr<juce::AudioFormat> format (flac ? static_cast<juce::AudioFormat*> (new juce::FlacAudioFormat()) : new juce::WavAudioFormat());
+            std::unique_ptr<juce::OutputStream> stream (f.createOutputStream());
+            auto w = format->createWriterFor (stream, juce::AudioFormatWriterOptions {}.withSampleRate (44100.0).withNumChannels (1).withBitsPerSample (16));
+            w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+        };
+        save (tones.getChildFile ("tone.wav"), tone (440.0, 44100), false);
+        save (tones.getChildFile ("tone_flac.flac"), tone (440.0, 44100), true);
+        save (tones.getChildFile ("tone_padded.wav"), tone (440.0, 44100 + 882), false); // 20 ms of extra silence
+        save (tones.getChildFile ("other_tone.wav"), tone (1250.0, 44100), false);
+        save (tones.getChildFile ("long_tone.wav"), tone (440.0, 44100 * 3), false);
+
+        FeatureStore featureStore (base.getChildFile ("features.bin"));
+        std::vector<juce::File> toneFiles;
+        for (const auto& f : tones.findChildFiles (juce::File::findFiles, false, "*"))
+        {
+            FeatureVector v {};
+            if (computeFeatures (formats, f, v))
+                featureStore.put (f, v);
+            toneFiles.push_back (f);
+        }
+
+        const auto near = findNearDuplicates (toneFiles, featureStore);
+        check (near.size() == 1 && ! near[0].exact && nameSet (near[0]) == std::set<juce::String> { "tone.wav", "tone_flac.flac", "tone_padded.wav" },
+               "the same tone as WAV, FLAC and with 20 ms extra silence is grouped as near-duplicates");
+        check (nameSet (near[0]).count ("other_tone.wav") == 0 && nameSet (near[0]).count ("long_tone.wav") == 0, "a different pitch or a much longer take is not");
+        return ok;
+    }
+
+    /** Read-only report on a real library: how many spelling groups, and how much reading a duplicate scan would need. */
+    bool reportChecks()
+    {
+        const auto root = juce::String ("G:\\SE");
+        if (! juce::File (root).isDirectory())
+        {
+            std::printf ("no %s\n", root.toRawUTF8());
+            return false;
+        }
+
+        LibraryIndex index;
+        index.setRoots (juce::StringArray { root });
+        for (int i = 0; i < 3600 && (index.isScanning() || index.getData()->entries.empty()); ++i)
+            juce::Thread::sleep (50);
+        const auto data = index.getData();
+        std::printf ("files=%d names=%d\n", (int) data->entries.size(), (int) data->bases.size());
+
+        for (auto [label, sens] : { std::pair<const char*, NameSensitivity> { "strict", NameSensitivity::Strict },
+                                    std::pair<const char*, NameSensitivity> { "normal", NameSensitivity::Normal },
+                                    std::pair<const char*, NameSensitivity> { "loose", NameSensitivity::Loose } })
+        {
+            const auto t0 = juce::Time::getMillisecondCounter();
+            const auto groups = findSimilarNames (*data, sens);
+            std::printf ("%s: %d groups (%u ms)\n", label, (int) groups.size(), juce::Time::getMillisecondCounter() - t0);
+            if (sens == NameSensitivity::Normal)
+                for (size_t i = 0; i < groups.size() && i < 40; ++i)
+                {
+                    juce::String line = "  ";
+                    for (const auto& v : groups[i].variants)
+                        line += v.display + "(" + juce::String (v.count) + ")  ";
+                    std::printf ("%s\n", line.toRawUTF8());
+                }
+        }
+
+        std::unordered_map<juce::int64, int> bySize;
+        for (const auto& e : data->entries)
+            if (e.size >= 512)
+                ++bySize[e.size];
+        int groups = 0, files = 0;
+        double bytes = 0.0;
+        for (const auto& [size, n] : bySize)
+            if (n >= 2)
+            {
+                ++groups;
+                files += n;
+                bytes += (double) size * n;
+            }
+        std::printf ("size-collision groups=%d files=%d (stage 1 reads ~%.0f MB; the whole of these files is %.1f GB)\n", groups, files, files * 128.0 / 1024.0, bytes / 1.0e9);
+        return true;
     }
 
     /** Loads whatever workbook is already in the isolated config folder (e.g. one written by openpyxl) and prints what was read. */

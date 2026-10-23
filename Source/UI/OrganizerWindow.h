@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Catalog.h"
+#include "Core/Checks.h"
 #include "Core/Clustering.h"
 #include "Core/FeatureStore.h"
 #include "Core/HardLinks.h"
@@ -16,6 +17,7 @@ struct OrganizerHooks
     std::function<juce::StringArray()> getRoots;
     std::function<juce::File()> getOutputDir;
     std::function<void (const juce::File&)> setOutputDir;
+    std::function<IndexDataPtr()> getIndex; // the library listing (names, sizes) for the spelling / duplicate checks
 };
 
 /**
@@ -39,6 +41,7 @@ public:
 private:
     class GroupsModel;
     class FilesModel;
+    class CheckModel;
     class LayoutTab;
 
     // grouping tab
@@ -68,6 +71,24 @@ private:
     juce::File manifestFile() const;
     std::vector<AssignedFile> resolveAssigned() const;
 
+    // checks tab
+    struct CheckRow
+    {
+        int group = 0;
+        juce::String kind, name, detail, location;
+        juce::File file;
+        juce::StringArray groupKeys; // spelling groups: the keys of every variant (for "treat as different names")
+    };
+
+    void runSpellingCheck();
+    void runExactCheck();
+    void runNearCheck();
+    void finishCheck (std::vector<CheckRow> rows, const juce::String& message);
+    void ignoreSelectedSpelling();
+    void exportChecks();
+    juce::File ignoreFile() const;
+    const CheckRow* selectedCheckRow() const;
+
     void timerCallback() override;
 
     Catalog& catalog;
@@ -91,7 +112,17 @@ private:
     juce::TableListBox filesTable;
 
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
-    std::unique_ptr<LayoutTab> groupingTab, outputTab;
+    std::unique_ptr<LayoutTab> groupingTab, outputTab, checkTab;
+    std::unique_ptr<CheckModel> checkModel;
+    juce::TableListBox checkTable;
+    std::vector<CheckRow> checkRows;
+    juce::ComboBox sensitivityBox;
+    juce::TextButton spellingButton, exactButton, nearButton, cancelCheckButton, revealCheckButton, ignoreButton, exportCheckButton;
+    juce::Label checkStatus;
+    HashStore hashStore { HashStore::defaultFile() };
+    juce::ThreadPool checkJobs { juce::ThreadPoolOptions {}.withNumberOfThreads (1) };
+    std::atomic<bool> cancelCheck { false }, checkRunning { false };
+    std::atomic<int> checkDone { 0 }, checkTotal { 0 };
 
     juce::Label folderLabel, statusLabel, kLabel, categoryLabel, outputPath, outputSummary;
     juce::TextButton folderButton, analyzeButton, autoKButton, groupButton, categoryButton, typeMenuButton,
