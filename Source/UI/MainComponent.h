@@ -34,6 +34,13 @@ public:
 
     std::function<void (const juce::String&)> onTitleChanged;
 
+    // hooks for the isolated self tests (Main.cpp --selftest-prefs)
+    void testSaveNow() { saveNow(); }
+    bool testPrefsLoadFailed() const { return prefsLoadFailed; }
+    juce::String testChangeFolder (const juce::File& dir) { return changeConfigFolder (dir); }
+    const Catalog& testCatalog() const { return catalog; }
+    const CycleModel& testCycles() const { return cycles; }
+
     void paint (juce::Graphics& g) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress& key) override;
@@ -68,6 +75,9 @@ private:
     void setLibraryRoots (const juce::StringArray& roots);
     void afterExport (const juce::File& destFolder);
     void showInputSettings();
+    void applySharedPreferences (const juce::var& prefs);
+    juce::String changeConfigFolder (const juce::File& newDir);
+    void offerConfigMigration();
     void updateHint();
     bool confirmReselect (int type);
 
@@ -110,6 +120,7 @@ private:
     juce::String lastInfoKey;
     int snapshotWaits = 0;
     int frameCounter = 0;
+    bool prefsLoadFailed = false, prefsBackedUp = false, migrationDeclined = false;
     int editingCycle = -1; // cycle whose range is being re-selected (double click)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)

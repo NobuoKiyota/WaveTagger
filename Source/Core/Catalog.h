@@ -34,14 +34,20 @@ class Catalog : public juce::ChangeBroadcaster
 public:
     static constexpr const char* commonCategory = "*";
 
-    /** Folder suggestion when none is saved: G:\SFX_Library\_config, else Documents\WaveTagger\config. */
+    /** Folder suggestion when none is saved: the shared Drive folder if there is one, else G:\SFX_Library\_config, else Documents. */
     static juce::File defaultDirectory();
+    /** D:\マイドライブ\WaveTagger\config (Google Drive mirror, same path on every PC); empty if no Drive folder exists. */
+    static juce::File sharedDirectory();
+    /** Copies catalog.xlsx / CSVs / preferences.json that the target does not already have. Never overwrites. Returns the count. */
+    static int copyConfigFiles (const juce::File& from, const juce::File& to);
 
     void setDirectory (const juce::File& dir);
     const juce::File& getDirectory() const { return directory; }
     juce::File getWorkbookFile() const { return directory.getChildFile ("catalog.xlsx"); }
     juce::File getCategoriesFile() const { return directory.getChildFile ("categories.csv"); }
     juce::File getTypesFile() const { return directory.getChildFile ("types.csv"); }
+    /** Settings shared between PCs (keys, wheel, colours, naming); lives next to the workbook so a Drive mirror carries it. */
+    juce::File getPreferencesFile() const { return directory.getChildFile ("preferences.json"); }
     /** The file a human should edit (the workbook once it exists). */
     juce::File getEditTarget() const { return getWorkbookFile().existsAsFile() ? getWorkbookFile() : getCategoriesFile(); }
 
@@ -70,6 +76,8 @@ private:
     void syncAndLoad (std::vector<juce::StringArray>& categoryRows, std::vector<juce::StringArray>& typeRows);
     bool appendRow (bool toTypes, const juce::StringArray& fields);
     juce::String currentStamp() const;
+    void pruneBackups() const;
+    void detectConflictCopies();
 
     juce::File directory;
     std::vector<CategoryInfo> categories;

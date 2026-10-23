@@ -15,3 +15,10 @@
 - `--snapshot-picker <out.png>` (Category アコーディオン) / `--snapshot-input <out.png>` (入力設定。`WT_DEMO_TAB=1` でショートカット側) / `--selftest-catalog` (CSV の読み書き)
 - Category / Type の正本は `catalog.xlsx` (シート Categories / Types)。`categories.csv` / `types.csv` (UTF-8 BOM) はそこから自動生成される派生物。CSV を直接編集した場合は xlsx に取り込む (古い xlsx は `.bak-<時刻>` で保存)。Excel の「CSV」(Shift-JIS) も読める。アプリからの追加は xlsx の該当シートに 1 行追記するだけ (他のシート・書式は保持)
 - 検証: `--selftest-catalog` (20 項目) / `--selftest-catalog-load` (`WT_APPDATA/config/catalog.xlsx` を読んで内容を表示。openpyxl 製 xlsx の照合用)
+
+## 設定の置き場所 (複数 PC 前提)
+- 共通 (Google Drive ミラー `D:\マイドライブ\WaveTagger\config` が既定。`Catalog::sharedDirectory()`): `catalog.xlsx` / CSV / `preferences.json` (キー・ホイール・色・命名・Category 使用回数)
+- PC ごと (`%APPDATA%\WaveTagger\settings.json`): ライブラリの場所 (`libraryRoots`)、書き出し先、`configDir`、移行ダイアログの辞退フラグ。サイクル情報 (`projects\`) も PC ごと (WAV のパスが鍵)
+- `preferences.json` が読めない時 (Drive 同期中など) は上書きしない。保存の初回に `.bak-<時刻>` を 1 つ作り、`.bak-*` は新しい 5 つだけ残す。Drive の競合コピー (`catalog (1).xlsx` 等) は警告表示
+- 設定フォルダの変更 (`設定` ダイアログの「設定フォルダ」タブ): コピーのみ・上書き/削除なし。移動先にすでに設定があればそれを採用
+- 検証: `--selftest-prefs` (設定の分割・上書き防止・フォルダ移動 12 項目)、`--selftest-catalog` (26 項目)。`WT_DEMO_TAB=0/1/2` で `--snapshot-input` のタブを選べる

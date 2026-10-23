@@ -180,6 +180,11 @@ MainComponent::MainComponent()
     vblank = std::make_unique<juce::VBlankAttachment> (this, [this] { onVBlank(); });
 
     setSize (1400, 900);
+
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)] {
+        if (safe != nullptr)
+            safe->offerConfigMigration();
+    });
 }
 
 MainComponent::~MainComponent()
@@ -199,7 +204,7 @@ MainComponent::~MainComponent()
 //==============================================================================
 void MainComponent::loadSettings()
 {
-    const auto s = readJson (getSettingsFile());
+    const auto s = readJson (getSettingsFile()); // this PC only
 
     // Index roots: legacy library is read-only; the new library is where exports go.
     juce::StringArray roots;
@@ -212,25 +217,41 @@ void MainComponent::loadSettings()
                 roots.add (def);
     libraryIndex.setRoots (roots);
 
-    // Category / Type CSV folder: remembered once chosen so it never silently moves
+    // Category / Type workbook + shared preferences folder: remembered once chosen so it never silently moves
     const auto savedDir = s.getProperty ("configDir", "").toString();
     catalog.setDirectory (savedDir.isNotEmpty() ? juce::File (savedDir) : Catalog::defaultDirectory());
 
-    if (! s.isObject())
+    exportDir = juce::File (s.getProperty ("exportDir", "").toString());
+    migrationDeclined = (bool) s.getProperty ("configMigrationDeclined", false);
+
+    // Shared settings come from the config folder. The first time, carry over what this PC had in settings.json.
+    // If the file exists but cannot be parsed (e.g. Drive is mid-sync) it is left alone rather than overwritten by defaults.
+    auto prefs = readJson (catalog.getPreferencesFile());
+    if (catalog.getPreferencesFile().existsAsFile() && ! prefs.isObject())
+        prefsLoadFailed = true;
+    else if (! prefs.isObject())
+        prefs = s;
+
+    if (! prefsLoadFailed)
+        applySharedPreferences (prefs);
+}
+
+void MainComponent::applySharedPreferences (const juce::var& v)
+{
+    if (! v.isObject())
         return;
 
-    catalog.usageFromVar (s.getProperty ("categoryUsage", {}));
-    keyMap.fromVar (s.getProperty ("keys", {}));
+    catalog.usageFromVar (v.getProperty ("categoryUsage", {}));
+    keyMap.fromVar (v.getProperty ("keys", {}));
+    cycles.settingsFromVar (v.getProperty ("cycle", {}));
+    autoPreviewToggle.setToggleState ((bool) v.getProperty ("autoPreview", true), juce::dontSendNotification);
+    continueToggle.setToggleState ((bool) v.getProperty ("continueNumbering", true), juce::dontSendNotification);
+    wheelMap.fromVar (v.getProperty ("wheel", {}));
 
-    cycles.settingsFromVar (s.getProperty ("cycle", {}));
-    exportDir = juce::File (s.getProperty ("exportDir", "").toString());
-    autoPreviewToggle.setToggleState ((bool) s.getProperty ("autoPreview", true), juce::dontSendNotification);
-    continueToggle.setToggleState ((bool) s.getProperty ("continueNumbering", true), juce::dontSendNotification);
-    wheelMap.fromVar (s.getProperty ("wheel", {}));
-
-    const auto scheme = juce::jlimit (0, schemeCombo.getNumItems() - 1, (int) s.getProperty ("scheme", 0));
+    const auto scheme = juce::jlimit (0, schemeCombo.getNumItems() - 1, (int) v.getProperty ("scheme", 0));
     schemeCombo.setSelectedId (scheme + 1, juce::dontSendNotification);
     waveView.setColourScheme (scheme);
+    updateHint();
 }
 
 void MainComponent::scheduleSave()
@@ -248,22 +269,41 @@ void MainComponent::saveNow()
     if (snapshotOutput != juce::File())
         return;
 
-    auto* settings = new juce::DynamicObject();
-    settings->setProperty ("cycle", cycles.settingsToVar());
-    settings->setProperty ("exportDir", exportDir.getFullPathName());
-    settings->setProperty ("autoPreview", autoPreviewToggle.getToggleState());
-    settings->setProperty ("continueNumbering", continueToggle.getToggleState());
-    settings->setProperty ("wheel", wheelMap.toVar());
-    settings->setProperty ("keys", keyMap.toVar());
-    settings->setProperty ("configDir", catalog.getDirectory().getFullPathName());
-    settings->setProperty ("categoryUsage", catalog.usageToVar());
-    settings->setProperty ("scheme", schemeCombo.getSelectedId() - 1);
+    // this PC only: where things are on this machine
+    auto* local = new juce::DynamicObject();
+    local->setProperty ("exportDir", exportDir.getFullPathName());
+    local->setProperty ("configDir", catalog.getDirectory().getFullPathName());
+    local->setProperty ("configMigrationDeclined", migrationDeclined);
 
     juce::Array<juce::var> rootArray;
     for (const auto& r : libraryIndex.getRoots())
         rootArray.add (r);
-    settings->setProperty ("libraryRoots", rootArray);
-    writeJson (getSettingsFile(), juce::var (settings));
+    local->setProperty ("libraryRoots", rootArray);
+    writeJson (getSettingsFile(), juce::var (local));
+
+    // shared between PCs (lives next to catalog.xlsx)
+    if (! prefsLoadFailed)
+    {
+        auto* shared = new juce::DynamicObject();
+        shared->setProperty ("cycle", cycles.settingsToVar());
+        shared->setProperty ("autoPreview", autoPreviewToggle.getToggleState());
+        shared->setProperty ("continueNumbering", continueToggle.getToggleState());
+        shared->setProperty ("wheel", wheelMap.toVar());
+        shared->setProperty ("keys", keyMap.toVar());
+        shared->setProperty ("categoryUsage", catalog.usageToVar());
+        shared->setProperty ("scheme", schemeCombo.getSelectedId() - 1);
+
+        const auto prefsFile = catalog.getPreferencesFile();
+        if (prefsFile.getParentDirectory().isDirectory())
+        {
+            if (! prefsBackedUp && prefsFile.existsAsFile())
+            {
+                prefsFile.copyFileTo (prefsFile.getSiblingFile ("preferences.json.bak-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S")));
+                prefsBackedUp = true; // once per session
+            }
+            writeJson (prefsFile, juce::var (shared));
+        }
+    }
 
     if (audio != nullptr)
     {
@@ -575,18 +615,78 @@ void MainComponent::updateHint()
 
 void MainComponent::showInputSettings()
 {
-    auto* content = new InputSettingsComponent (wheelMap, keyMap, [this] {
-        updateHint();
-        scheduleSave();
-    });
+    auto* content = new InputSettingsComponent (
+        wheelMap, keyMap,
+        [this] {
+            updateHint();
+            scheduleSave();
+        },
+        [this] { return catalog.getDirectory(); },
+        [this] (const juce::File& dir) { return changeConfigFolder (dir); });
 
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned (content);
-    options.dialogTitle = WT_U8 ("入力設定 (マウス / キーボード)");
+    options.dialogTitle = WT_U8 ("設定 (マウス / キーボード / 設定フォルダ)");
     options.dialogBackgroundColour = theme::panel;
     options.useNativeTitleBar = true;
     options.resizable = false;
     options.launchAsync();
+}
+
+/** Moves to another config folder: files the new place lacks are copied over (nothing is overwritten or deleted). */
+juce::String MainComponent::changeConfigFolder (const juce::File& newDir)
+{
+    if (newDir == catalog.getDirectory())
+        return WT_U8 ("すでにこのフォルダを使っています。");
+
+    saveNow(); // make sure the current shared settings are in the old folder before they are copied
+    newDir.createDirectory();
+    const auto copied = Catalog::copyConfigFiles (catalog.getDirectory(), newDir);
+
+    catalog.setDirectory (newDir);
+    prefsLoadFailed = false;
+    prefsBackedUp = false;
+
+    // a folder that already holds preferences (another PC set it up) wins
+    const auto prefs = readJson (catalog.getPreferencesFile());
+    if (catalog.getPreferencesFile().existsAsFile() && ! prefs.isObject())
+        prefsLoadFailed = true;
+    else if (prefs.isObject())
+        applySharedPreferences (prefs);
+
+    lastInfoKey = {};
+    refreshLibraryInfo();
+    scheduleSave();
+    return juce::String (copied) + WT_U8 (" 個のファイルを新しい場所へコピーし、このフォルダに切り替えました。\n元のフォルダのファイルは、そのまま残してあります。");
+}
+
+void MainComponent::offerConfigMigration()
+{
+    const auto shared = Catalog::sharedDirectory();
+    if (shared.getFullPathName().isEmpty() || migrationDeclined || catalog.getDirectory() == shared)
+        return;
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::AlertWindow::showOkCancelBox (
+        juce::MessageBoxIconType::QuestionIcon, WT_U8 ("設定フォルダを共有フォルダへ移しますか?"),
+        WT_U8 ("Category / Type の表やショートカットなどの共通設定を、Google Drive のミラー上の次のフォルダへ移すと、別の PC でも同じ設定を使えます。\n\n")
+            + shared.getFullPathName() + WT_U8 ("\n\n現在のフォルダの内容はコピーするだけで、元のファイルは残します。"),
+        WT_U8 ("移す"), WT_U8 ("いまのまま"), this,
+        juce::ModalCallbackFunction::create ([safe, shared] (int result) {
+            if (safe == nullptr)
+                return;
+
+            if (result == 1)
+            {
+                const auto message = safe->changeConfigFolder (shared);
+                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, WT_U8 ("設定フォルダを移しました"), message);
+            }
+            else
+            {
+                safe->migrationDeclined = true;
+                safe->scheduleSave();
+            }
+        }));
 }
 
 void MainComponent::previewCycle (int index)

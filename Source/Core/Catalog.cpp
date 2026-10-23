@@ -227,16 +227,81 @@ void seedRows (std::vector<juce::StringArray>& categoryRows, std::vector<juce::S
 }
 } // namespace
 
+juce::File Catalog::sharedDirectory()
+{
+    if (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}).isNotEmpty())
+        return {}; // test runs never look at the real Drive folder
+
+    for (const auto& drive : { juce::String::fromUTF8 ("D:\\マイドライブ"), juce::String ("D:\\My Drive") })
+        if (juce::File (drive).isDirectory())
+            return juce::File (drive).getChildFile ("WaveTagger").getChildFile ("config");
+
+    return {};
+}
+
 juce::File Catalog::defaultDirectory()
 {
     const auto env = juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {});
     if (env.isNotEmpty())
         return juce::File (env).getChildFile ("config");
 
+    const auto shared = sharedDirectory();
+    if (shared.getFullPathName().isNotEmpty())
+        return shared;
+
     if (juce::File ("G:\\").exists())
         return juce::File ("G:\\SFX_Library\\_config");
 
     return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("WaveTagger").getChildFile ("config");
+}
+
+int Catalog::copyConfigFiles (const juce::File& from, const juce::File& to)
+{
+    to.createDirectory();
+
+    int copied = 0;
+    for (const auto* name : { "catalog.xlsx", "categories.csv", "types.csv", "preferences.json" })
+    {
+        const auto source = from.getChildFile (name);
+        const auto target = to.getChildFile (name);
+        if (source.existsAsFile() && ! target.exists() && source.copyFileTo (target))
+            ++copied;
+    }
+    return copied;
+}
+
+/** Keeps the newest few .bak copies of each file; Drive would otherwise sync an ever-growing pile. */
+void Catalog::pruneBackups() const
+{
+    constexpr int keep = 5;
+    for (const auto* base : { "catalog.xlsx", "categories.csv", "types.csv", "preferences.json" })
+    {
+        auto backups = directory.findChildFiles (juce::File::findFiles, false, juce::String (base) + ".bak-*");
+        if (backups.size() <= keep)
+            continue;
+
+        std::sort (backups.begin(), backups.end(), [] (const juce::File& a, const juce::File& b) { return a.getFileName() > b.getFileName(); });
+        for (int i = keep; i < backups.size(); ++i)
+            backups.getReference (i).deleteFile();
+    }
+}
+
+/** Google Drive makes "name (1).xlsx"-style copies when two PCs edit the same file; point them out instead of silently ignoring them. */
+void Catalog::detectConflictCopies()
+{
+    for (const auto& f : directory.findChildFiles (juce::File::findFiles, false, "*"))
+    {
+        const auto name = f.getFileName();
+        const auto lower = name.toLowerCase();
+        const auto stem = lower.upToFirstOccurrenceOf (".", false, false);
+        const auto ext = f.getFileExtension().toLowerCase();
+
+        const auto ours = stem.startsWith ("catalog") || stem.startsWith ("categories") || stem.startsWith ("types") || stem.startsWith ("preferences");
+        const auto exact = lower == "catalog.xlsx" || lower == "categories.csv" || lower == "types.csv" || lower == "preferences.json";
+        const auto known = ext == ".xlsx" || ext == ".csv" || ext == ".json";
+        if (ours && known && ! exact && ! lower.contains (".bak-") && ! lower.endsWith ("~"))
+            warnings.add ("Possible Drive conflict copy: " + name + " (compare it with the original and delete the one you do not need)");
+    }
 }
 
 void Catalog::setDirectory (const juce::File& dir)
@@ -409,6 +474,8 @@ void Catalog::reload()
 
     std::vector<juce::StringArray> catRows, typeRows;
     syncAndLoad (catRows, typeRows);
+    pruneBackups();
+    detectConflictCopies();
     loadedStamp = currentStamp();
 
     juce::StringArray seen;

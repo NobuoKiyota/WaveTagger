@@ -32,10 +32,31 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ShortcutSettingsComponent)
 };
 
-/** Tabs: mouse wheel assignments and keyboard shortcuts. */
+/** Where the shared settings / Category-Type workbook live, and a button to move them. */
+class FolderSettingsComponent : public juce::Component
+{
+public:
+    /** onChoose receives the new folder and returns a message to show (e.g. how many files were copied). */
+    FolderSettingsComponent (std::function<juce::File()> getFolder, std::function<juce::String (const juce::File&)> onChoose);
+
+    void resized() override;
+    void paint (juce::Graphics& g) override;
+
+private:
+    std::function<juce::File()> getFolder;
+    std::function<juce::String (const juce::File&)> onChoose;
+    juce::Label intro, pathLabel, status;
+    juce::TextButton changeButton, openButton;
+    std::unique_ptr<juce::FileChooser> chooser;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FolderSettingsComponent)
+};
+
+/** Tabs: mouse wheel assignments, keyboard shortcuts, shared settings folder. */
 class InputSettingsComponent : public juce::TabbedComponent
 {
 public:
-    InputSettingsComponent (WheelMap& wheel, KeyMap& keys, std::function<void()> onChanged);
+    InputSettingsComponent (WheelMap& wheel, KeyMap& keys, std::function<void()> onChanged,
+                            std::function<juce::File()> getFolder, std::function<juce::String (const juce::File&)> onChooseFolder);
 };
 } // namespace wt

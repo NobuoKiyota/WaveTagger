@@ -56,9 +56,11 @@ public:
             return;
         }
 
-        if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load"))
+        if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"))
         {
-            setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog() : selfTestCatalogLoad()) ? 0 : 1);
+            setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
+                                        : args[0] == "--selftest-prefs" ? selfTestPrefs()
+                                                                          : selfTestCatalogLoad()) ? 0 : 1);
             quit();
             return;
         }
@@ -98,9 +100,9 @@ private:
             content = std::make_unique<CategoryPicker> (catalog, "TOOLS", [] (const juce::String&) {}, [] {});
         else
         {
-            auto input = std::make_unique<InputSettingsComponent> (wheelMap, keyMap, [] {});
-            if (juce::SystemStats::getEnvironmentVariable ("WT_DEMO_TAB", {}).isNotEmpty())
-                input->setCurrentTabIndex (1);
+            auto input = std::make_unique<InputSettingsComponent> (wheelMap, keyMap, [] {}, [this] { return catalog.getDirectory(); }, [] (const juce::File&) { return juce::String(); });
+            if (const auto tab = juce::SystemStats::getEnvironmentVariable ("WT_DEMO_TAB", {}); tab.isNotEmpty())
+                input->setCurrentTabIndex (tab.getIntValue());
             content = std::move (input);
         }
         content->setSize (picker ? 400 : 800, picker ? 560 : 580);
@@ -220,6 +222,116 @@ private:
             xlsx::write (catalog.getWorkbookFile(), sheets, error);
             check (catalog.reloadIfChanged(), "workbook edit detected");
             check (csvText (catalog.getTypesFile()).contains (jp ("TOOLS,ExcelRow,エクセルで追加")), "types.csv regenerated from the workbook");
+        }
+
+        // 6. Drive housekeeping: conflict copies are reported, old backups are pruned
+        {
+            dir.getChildFile ("catalog (1).xlsx").replaceWithText ("x");
+            for (int i = 1; i <= 8; ++i)
+                dir.getChildFile ("types.csv.bak-2026010" + juce::String (i) + "-000000").replaceWithText ("old");
+            catalog.reload();
+
+            bool flagged = false;
+            for (const auto& w : catalog.getWarnings())
+                flagged = flagged || w.contains ("catalog (1).xlsx");
+            check (flagged, "Drive conflict copy is reported");
+            check (dir.findChildFiles (juce::File::findFiles, false, "types.csv.bak-*").size() == 5, "old backups pruned to the newest 5");
+            check (dir.getChildFile ("types.csv.bak-20260108-000000").existsAsFile() && ! dir.getChildFile ("types.csv.bak-20260101-000000").existsAsFile(),
+                   "the newest backups are the ones kept");
+        }
+
+        // 7. copying a config folder never overwrites
+        {
+            const auto other = testRoot.getChildFile ("copy_target");
+            other.deleteRecursively();
+            other.createDirectory();
+            other.getChildFile ("types.csv").replaceWithText ("KEEP");
+            const auto copied = Catalog::copyConfigFiles (dir, other);
+            check (copied >= 2 && other.getChildFile ("catalog.xlsx").existsAsFile(), "missing files are copied");
+            check (other.getChildFile ("types.csv").loadFileAsString() == "KEEP", "an existing file is not overwritten");
+            check (Catalog::copyConfigFiles (dir, other) == 0, "second copy has nothing left to copy");
+        }
+        return ok;
+    }
+
+    /** Shared vs per-PC settings, the unreadable-file guard and folder moves, using real MainComponents in the isolated folder. */
+    bool selfTestPrefs()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        const auto reset = [&] {
+            testRoot.getChildFile ("config").deleteRecursively();
+            testRoot.getChildFile ("config2").deleteRecursively();
+            testRoot.getChildFile ("config3").deleteRecursively();
+            testRoot.getChildFile ("catalog_state.json").deleteFile();
+        };
+        const auto writeLocal = [&] (const juce::String& json) {
+            testRoot.getChildFile ("settings.json").replaceWithText (json);
+        };
+        const juce::String roots = "\"libraryRoots\":[\"Z:\\\\none\"]"; // a folder that does not exist: no slow library scan
+
+        // 1. an old settings.json (everything in one file) is split into shared + per-PC
+        reset();
+        writeLocal ("{\"cycle\":{\"prefix\":\"Legacy\",\"pattern\":\"{prefix}_{type}{num:02}\",\"category\":\"\",\"typeNames\":[\"a\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\"]},"
+                    "\"keys\":{\"open\":[\"ctrl + P\"]},\"scheme\":2,\"exportDir\":\"X:\\\\out\"," + roots + "}");
+        {
+            MainComponent m;
+            check (m.testCycles().getPrefix() == "Legacy", "legacy settings.json is still read on first start");
+            m.testSaveNow();
+        }
+        const auto prefs = juce::JSON::parse (testRoot.getChildFile ("config").getChildFile ("preferences.json"));
+        const auto local = juce::JSON::parse (testRoot.getChildFile ("settings.json"));
+        check (prefs.getProperty ("cycle", {}).getProperty ("prefix", "").toString() == "Legacy" && (int) prefs.getProperty ("scheme", 0) == 2,
+               "shared settings written to preferences.json in the config folder");
+        check (prefs.getProperty ("keys", {}).getProperty ("open", {}).getArray() != nullptr, "shortcuts are in the shared file");
+        check (local.getProperty ("exportDir", "").toString() == "X:\\out" && local.hasProperty ("libraryRoots") && local.hasProperty ("configDir"),
+               "per-PC settings.json keeps export folder, library roots and config folder");
+        check (! local.hasProperty ("keys") && ! local.hasProperty ("cycle") && ! local.hasProperty ("scheme"), "shared items are no longer in the per-PC file");
+
+        // 2. a preferences file that cannot be read (Drive mid-sync) is never overwritten by defaults
+        const auto prefsFile = testRoot.getChildFile ("config").getChildFile ("preferences.json");
+        prefsFile.replaceWithText ("{ broken json");
+        {
+            MainComponent m;
+            check (m.testPrefsLoadFailed(), "unreadable preferences.json is detected");
+            m.testSaveNow();
+        }
+        check (prefsFile.loadFileAsString() == "{ broken json", "and it is left untouched");
+
+        // 3. moving to another folder copies, adopts what is already there, and keeps the old folder
+        reset();
+        writeLocal ("{" + roots + "}");
+        {
+            MainComponent m;
+            m.testSaveNow();
+            const auto oldDir = m.testCatalog().getDirectory();
+            const auto newDir = testRoot.getChildFile ("config2");
+            const auto message = m.testChangeFolder (newDir);
+            check (m.testCatalog().getDirectory() == newDir, "config folder switched");
+            check (newDir.getChildFile ("catalog.xlsx").existsAsFile() && newDir.getChildFile ("preferences.json").existsAsFile(), "workbook and preferences copied");
+            check (oldDir.getChildFile ("catalog.xlsx").existsAsFile(), "old folder keeps its files");
+            check (message.isNotEmpty(), "a message is returned for the dialog");
+
+            // a folder that another PC already set up wins
+            Catalog other;
+            other.setDirectory (testRoot.getChildFile ("config3"));
+            other.addCategory ("ONLYTHERE", "x");
+            m.testChangeFolder (testRoot.getChildFile ("config3"));
+            bool adopted = false;
+            for (const auto& c : m.testCatalog().getCategories())
+                adopted = adopted || c.name == "ONLYTHERE";
+            check (adopted, "an existing workbook in the chosen folder is adopted, not overwritten");
         }
         return ok;
     }

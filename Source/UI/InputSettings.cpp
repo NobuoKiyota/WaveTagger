@@ -171,13 +171,75 @@ void ShortcutSettingsComponent::resized()
     rows->setSize (viewport.getMaximumVisibleWidth(), rows->getContentHeight());
 }
 
-InputSettingsComponent::InputSettingsComponent (WheelMap& wheel, KeyMap& keys, std::function<void()> onChanged)
+FolderSettingsComponent::FolderSettingsComponent (std::function<juce::File()> get, std::function<juce::String (const juce::File&)> choose)
+    : getFolder (std::move (get)), onChoose (std::move (choose))
+{
+    intro.setText (WT_U8 ("Category / Type の表 (catalog.xlsx)、ショートカットキー、マウスホイール、色、命名の設定は、次のフォルダに保存されます。\n"
+                          "Google Drive のミラー上にあるフォルダを選べば、どの PC でも同じ設定になります。\n"
+                          "ライブラリの場所と書き出し先は、PC ごとに別々に覚えます。"),
+                   juce::dontSendNotification);
+    intro.setJustificationType (juce::Justification::topLeft);
+    intro.setColour (juce::Label::textColourId, theme::textDim);
+    addAndMakeVisible (intro);
+
+    pathLabel.setText (getFolder().getFullPathName(), juce::dontSendNotification);
+    pathLabel.setColour (juce::Label::textColourId, theme::text);
+    pathLabel.setColour (juce::Label::backgroundColourId, theme::panelLight);
+    pathLabel.setFont (juce::FontOptions (14.0f));
+    pathLabel.setBorderSize ({ 4, 8, 4, 8 });
+    addAndMakeVisible (pathLabel);
+
+    status.setColour (juce::Label::textColourId, juce::Colour (0xffffc533));
+    addAndMakeVisible (status);
+
+    changeButton.setButtonText (WT_U8 ("フォルダを変更..."));
+    changeButton.onClick = [this] {
+        chooser = std::make_unique<juce::FileChooser> (WT_U8 ("設定フォルダを選択 (中のファイルは新しい場所へコピーされます)"), getFolder());
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                              [this] (const juce::FileChooser& fc) {
+                                  const auto dir = fc.getResult();
+                                  if (! dir.isDirectory() && ! dir.getParentDirectory().isDirectory())
+                                      return;
+                                  status.setText (onChoose (dir), juce::dontSendNotification);
+                                  pathLabel.setText (getFolder().getFullPathName(), juce::dontSendNotification);
+                              });
+    };
+    addAndMakeVisible (changeButton);
+
+    openButton.setButtonText (WT_U8 ("エクスプローラーで開く"));
+    openButton.onClick = [this] { getFolder().revealToUser(); };
+    addAndMakeVisible (openButton);
+}
+
+void FolderSettingsComponent::paint (juce::Graphics& g)
+{
+    g.fillAll (theme::panel);
+}
+
+void FolderSettingsComponent::resized()
+{
+    auto r = getLocalBounds().reduced (14, 12);
+    intro.setBounds (r.removeFromTop (74));
+    r.removeFromTop (8);
+    pathLabel.setBounds (r.removeFromTop (30));
+    r.removeFromTop (10);
+    auto buttons = r.removeFromTop (30);
+    changeButton.setBounds (buttons.removeFromLeft (170));
+    buttons.removeFromLeft (8);
+    openButton.setBounds (buttons.removeFromLeft (190));
+    r.removeFromTop (12);
+    status.setBounds (r.removeFromTop (60));
+}
+
+InputSettingsComponent::InputSettingsComponent (WheelMap& wheel, KeyMap& keys, std::function<void()> onChanged,
+                                                std::function<juce::File()> getFolder, std::function<juce::String (const juce::File&)> onChooseFolder)
     : juce::TabbedComponent (juce::TabbedButtonBar::TabsAtTop)
 {
     setColour (juce::TabbedComponent::backgroundColourId, theme::panel);
     setTabBarDepth (32);
     addTab (WT_U8 ("マウスホイール"), theme::panel, new MouseSettingsComponent (wheel, onChanged), true);
     addTab (WT_U8 ("ショートカットキー"), theme::panel, new ShortcutSettingsComponent (keys, onChanged), true);
+    addTab (WT_U8 ("設定フォルダ"), theme::panel, new FolderSettingsComponent (std::move (getFolder), std::move (onChooseFolder)), true);
     setSize (800, 580);
 }
 } // namespace wt
