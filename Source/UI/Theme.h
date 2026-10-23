@@ -21,6 +21,7 @@ public:
     LookAndFeel();
 };
 
-/** RX-like black → brown → orange → yellow → white. */
-std::array<juce::PixelARGB, 256> makeSpectrogramLut();
+juce::StringArray getSpectrogramSchemeNames();
+/** scheme 0 is the RX-like black, brown, orange, yellow, white. */
+std::array<juce::PixelARGB, 256> makeSpectrogramLut (int scheme = 0);
 } // namespace wt::theme

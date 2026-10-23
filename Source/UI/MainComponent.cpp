@@ -21,7 +21,7 @@ MainComponent::MainComponent()
     formats.registerBasicFormats();
     setWantsKeyboardFocus (true);
 
-    for (auto* b : { &openButton, &audioButton, &importButton, &splitButton, &exportButton, &libraryButton })
+    for (auto* b : { &openButton, &audioButton, &importButton, &splitButton, &exportButton, &libraryButton, &mouseButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -48,6 +48,24 @@ MainComponent::MainComponent()
     splitButton.onClick = [this] { if (audio != nullptr) showAutoSplitDialog(); };
     exportButton.onClick = [this] { if (audio != nullptr) startExport(); };
     libraryButton.onClick = [this] { showLibrary(); };
+    mouseButton.onClick = [this] { showMouseSettings(); };
+
+    const auto schemes = theme::getSpectrogramSchemeNames();
+    for (int i = 0; i < schemes.size(); ++i)
+        schemeCombo.addItem (schemes[i], i + 1);
+    schemeCombo.setSelectedId (1, juce::dontSendNotification);
+    schemeCombo.setWantsKeyboardFocus (false);
+    schemeCombo.onChange = [this] {
+        waveView.setColourScheme (schemeCombo.getSelectedId() - 1);
+        scheduleSave();
+        grabKeyboardFocus();
+    };
+    addAndMakeVisible (schemeCombo);
+
+    hintLabel.setColour (juce::Label::textColourId, theme::textDim);
+    hintLabel.setFont (juce::FontOptions (12.5f));
+    hintLabel.setMinimumHorizontalScale (0.8f);
+    addAndMakeVisible (hintLabel);
 
     fileLabel.setColour (juce::Label::textColourId, theme::text);
     fileLabel.setFont (juce::FontOptions (14.0f));
@@ -85,6 +103,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (transport);
 
     waveView.setCycleModel (&cycles);
+    waveView.setWheelMap (&wheelMap);
     spectrogram.onNewImage = [this] { waveView.repaint(); };
 
     palette.onSlotClicked = [this] (int slot) { handleTypeKey (slot); grabKeyboardFocus(); };
@@ -99,6 +118,21 @@ MainComponent::MainComponent()
         waveView.setSelectedCycles ({ index });
         if (autoPreviewToggle.getToggleState())
             previewCycle (index);
+    };
+    waveView.onCycleEdited = [this] (int index) {
+        list.selectRow (index);
+        waveView.setSelectedCycles ({ index });
+        if (autoPreviewToggle.getToggleState())
+            previewCycle (index);
+    };
+    waveView.onCycleDoubleClicked = [this] (int index) {
+        if (index < 0 || index >= cycles.size())
+            return;
+        editingCycle = index;
+        view.setSelection (cycles[index].start, cycles[index].end);
+        list.selectRow (index);
+        waveView.setSelectedCycles ({ index });
+        updateHint();
     };
     waveView.onCycleMenuChoice = [this] (int index, int type) {
         auto rows = list.getSelectedRows();
@@ -125,8 +159,8 @@ MainComponent::MainComponent()
     list.onReturnKey = [this] (int row) {
         if (view.hasSelection())
         {
-            cycles.setRange (row, view.getSelectionStart(), view.getSelectionEnd());
-            view.clearSelection();
+            editingCycle = row;
+            confirmReselect (-2);
         }
     };
 
@@ -141,6 +175,7 @@ MainComponent::MainComponent()
     cycles.addChangeListener (this);
     libraryIndex.addChangeListener (this);
     refreshLibraryInfo();
+    updateHint();
     vblank = std::make_unique<juce::VBlankAttachment> (this, [this] { onVBlank(); });
 
     setSize (1400, 900);
@@ -182,6 +217,11 @@ void MainComponent::loadSettings()
     exportDir = juce::File (s.getProperty ("exportDir", "").toString());
     autoPreviewToggle.setToggleState ((bool) s.getProperty ("autoPreview", true), juce::dontSendNotification);
     continueToggle.setToggleState ((bool) s.getProperty ("continueNumbering", true), juce::dontSendNotification);
+    wheelMap.fromVar (s.getProperty ("wheel", {}));
+
+    const auto scheme = juce::jlimit (0, schemeCombo.getNumItems() - 1, (int) s.getProperty ("scheme", 0));
+    schemeCombo.setSelectedId (scheme + 1, juce::dontSendNotification);
+    waveView.setColourScheme (scheme);
 }
 
 void MainComponent::scheduleSave()
@@ -204,6 +244,8 @@ void MainComponent::saveNow()
     settings->setProperty ("exportDir", exportDir.getFullPathName());
     settings->setProperty ("autoPreview", autoPreviewToggle.getToggleState());
     settings->setProperty ("continueNumbering", continueToggle.getToggleState());
+    settings->setProperty ("wheel", wheelMap.toVar());
+    settings->setProperty ("scheme", schemeCombo.getSelectedId() - 1);
 
     juce::Array<juce::var> rootArray;
     for (const auto& r : libraryIndex.getRoots())
@@ -260,6 +302,8 @@ void MainComponent::audioLoaded (AudioDataPtr data, const juce::String& error)
     overview.setAudio (audio);
     view.reset (audio->getNumSamples(), audio->sampleRate);
     list.setSampleRate (audio->sampleRate);
+    editingCycle = -1;
+    updateHint();
     list.selectRows ({});
     waveView.setSelectedCycles ({});
 
@@ -293,6 +337,12 @@ void MainComponent::audioLoaded (AudioDataPtr data, const juce::String& error)
         for (int i = 0; i < cycles.size(); ++i)
             typed.push_back ({ cycles[i].start, cycles[i].end, i % 3 });
         cycles.replaceAll (std::move (typed), false);
+
+        if (juce::SystemStats::getEnvironmentVariable ("WT_DEMO_ZOOM", {}).isNotEmpty())
+        {
+            view.zoomFreqAround (0.45, 0.4);
+            view.zoomGain (4.0);
+        }
 
         const auto row = juce::jmin (3, cycles.size() - 1);
         if (row >= 0)
@@ -417,6 +467,12 @@ void MainComponent::handleTypeKey (int slot)
     if (audio == nullptr || ! cycles.isTypeUsable (slot))
         return;
 
+    if (editingCycle >= 0 && view.hasSelection())
+    {
+        confirmReselect (slot);
+        return;
+    }
+
     if (view.hasSelection())
     {
         addCycleFromSelection (slot);
@@ -446,6 +502,72 @@ void MainComponent::addCycleFromSelection (int slot)
 void MainComponent::applyType (const juce::Array<int>& rows, int type)
 {
     cycles.setType (rows, type);
+}
+
+bool MainComponent::confirmReselect (int type)
+{
+    if (editingCycle < 0 || editingCycle >= cycles.size() || ! view.hasSelection())
+        return false;
+
+    const auto start = view.getSelectionStart(), end = view.getSelectionEnd();
+    if ((double) (end - start) < audio->sampleRate * 0.001)
+        return false;
+
+    const auto newType = type == -2 ? cycles[editingCycle].type : type;
+    const auto index = cycles.update (editingCycle, start, end, newType);
+
+    editingCycle = -1;
+    view.clearSelection();
+    list.selectRow (index);
+    waveView.setSelectedCycles ({ index });
+    updateHint();
+
+    if (autoPreviewToggle.getToggleState())
+        previewCycle (index);
+    return true;
+}
+
+void MainComponent::updateHint()
+{
+    if (editingCycle >= 0 && editingCycle < cycles.size())
+    {
+        hintLabel.setText (WT_U8 ("再選択中: ") + cycles.nameOf (editingCycle)
+                               + WT_U8 ("  —  範囲を選び直して Enter(タイプそのまま)か数字キー(タイプも変更)で確定 / Esc で取消"),
+                           juce::dontSendNotification);
+        hintLabel.setColour (juce::Label::textColourId, juce::Colour (0xffffc533));
+        return;
+    }
+
+    juce::StringArray parts;
+    const char* mods[] = { "", "Shift+", "Alt+", "Ctrl+" };
+    for (int m = 0; m < (int) ModKey::Count; ++m)
+    {
+        const auto a = wheelMap.get (WheelContext::Wave, (ModKey) m);
+        if (a != WheelAction::None)
+            parts.add (juce::String (mods[m]) + WT_U8 ("ホイール: ") + WheelMap::actionName (a));
+    }
+    if (wheelMap.get (WheelContext::DbAxis, ModKey::None) != WheelAction::None)
+        parts.add (WT_U8 ("dB 目盛り上: ") + WheelMap::actionName (wheelMap.get (WheelContext::DbAxis, ModKey::None)));
+
+    hintLabel.setText (parts.joinIntoString ("  |  ") + WT_U8 ("   ||   サイクルの端ドラッグ: 境界調整  Alt+ドラッグ: 移動  ダブルクリック: 範囲の再選択"),
+                       juce::dontSendNotification);
+    hintLabel.setColour (juce::Label::textColourId, theme::textDim);
+}
+
+void MainComponent::showMouseSettings()
+{
+    auto* content = new MouseSettingsComponent (wheelMap, [this] {
+        updateHint();
+        scheduleSave();
+    });
+
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned (content);
+    options.dialogTitle = WT_U8 ("マウスホイールの割り当て");
+    options.dialogBackgroundColour = theme::panel;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    options.launchAsync();
 }
 
 void MainComponent::previewCycle (int index)
@@ -753,31 +875,37 @@ void MainComponent::resized()
     auto r = getLocalBounds();
 
     auto bar = r.removeFromTop (toolbarHeight).reduced (8, 5);
-    openButton.setBounds (bar.removeFromLeft (64));
+    openButton.setBounds (bar.removeFromLeft (56));
     bar.removeFromLeft (6);
-    audioButton.setBounds (bar.removeFromLeft (76));
-    bar.removeFromLeft (14);
-    importButton.setBounds (bar.removeFromLeft (112));
+    audioButton.setBounds (bar.removeFromLeft (66));
+    bar.removeFromLeft (12);
+    importButton.setBounds (bar.removeFromLeft (104));
     bar.removeFromLeft (6);
-    splitButton.setBounds (bar.removeFromLeft (84));
+    splitButton.setBounds (bar.removeFromLeft (76));
     bar.removeFromLeft (6);
-    exportButton.setBounds (bar.removeFromLeft (84));
+    exportButton.setBounds (bar.removeFromLeft (76));
     bar.removeFromLeft (6);
-    libraryButton.setBounds (bar.removeFromLeft (74));
-    bar.removeFromLeft (14);
-    autoPreviewToggle.setBounds (bar.removeFromLeft (112));
-    continueToggle.setBounds (bar.removeFromLeft (150));
+    libraryButton.setBounds (bar.removeFromLeft (66));
+    bar.removeFromLeft (12);
+    autoPreviewToggle.setBounds (bar.removeFromLeft (108));
+    continueToggle.setBounds (bar.removeFromLeft (146));
     bar.removeFromLeft (8);
-    floorSlider.setBounds (bar.removeFromRight (130));
-    floorLabel.setBounds (bar.removeFromRight (70));
+
+    mouseButton.setBounds (bar.removeFromRight (74));
+    bar.removeFromRight (6);
+    schemeCombo.setBounds (bar.removeFromRight (104));
     bar.removeFromRight (10);
-    blendSlider.setBounds (bar.removeFromRight (130));
-    blendLabel.setBounds (bar.removeFromRight (84));
+    floorSlider.setBounds (bar.removeFromRight (90));
+    floorLabel.setBounds (bar.removeFromRight (56));
+    bar.removeFromRight (8);
+    blendSlider.setBounds (bar.removeFromRight (90));
+    blendLabel.setBounds (bar.removeFromRight (82));
     fileLabel.setBounds (bar);
 
     palette.setBounds (r.removeFromTop (PalettePanel::height));
     transport.setBounds (r.removeFromBottom (transportHeight));
     list.setBounds (r.removeFromBottom (listHeight));
+    hintLabel.setBounds (r.removeFromBottom (22).reduced (8, 0));
     overview.setBounds (r.removeFromTop (overviewHeight)
                             .withTrimmedLeft (WaveView::leftStrip)
                             .withTrimmedRight (WaveView::rightAxis));
@@ -834,7 +962,17 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     const auto centrePx = 0.5 * view.getWidth();
 
     if (code == juce::KeyPress::spaceKey)          togglePlay();
-    else if (code == juce::KeyPress::escapeKey)    view.clearSelection();
+    else if (code == juce::KeyPress::returnKey)
+    {
+        if (! confirmReselect (-2))
+            return false;
+    }
+    else if (code == juce::KeyPress::escapeKey)
+    {
+        editingCycle = -1;
+        updateHint();
+        view.clearSelection();
+    }
     else if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey)
         deleteSelectedCycles();
     else if (code == juce::KeyPress::homeKey)      { view.setCursor (0); view.ensureVisible (0); }

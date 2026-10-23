@@ -14,7 +14,7 @@ public:
         content->onTitleChanged = [this] (const juce::String& title) { setName (title); };
         setContentOwned (content, true);
         setResizable (true, false);
-        setResizeLimits (800, 500, 10000, 10000);
+        setResizeLimits (1180, 600, 10000, 10000);
         centreWithSize (getWidth(), getHeight());
         setVisible (true);
     }

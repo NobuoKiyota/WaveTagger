@@ -14,6 +14,9 @@ public:
         sampleRate = rate;
         cursor = 0;
         selStart = selEnd = 0;
+        freqLo = 0.0;
+        freqHi = 1.0;
+        waveGain = 1.0;
         zoomToFit();
     }
 
@@ -76,6 +79,33 @@ public:
             setView (sample - 0.05 * spp * widthPx, spp);
     }
 
+    //== vertical (frequency) range, normalised on the mel display scale: 0 = DC, 1 = Nyquist
+    double getFreqLo() const { return freqLo; }
+    double getFreqHi() const { return freqHi; }
+
+    void zoomFreqAround (double anchorNorm, double factor)
+    {
+        const auto range = freqHi - freqLo;
+        const auto rel = (anchorNorm - freqLo) / range;
+        const auto newRange = juce::jlimit (0.02, 1.0, range * factor);
+        setFreqRange (anchorNorm - rel * newRange, newRange);
+    }
+
+    void scrollFreq (double deltaNorm) { setFreqRange (freqLo + deltaNorm, freqHi - freqLo); }
+    void resetFreq() { setFreqRange (0.0, 1.0); }
+
+    //== waveform amplitude zoom (1 = full scale fits the lane)
+    double getWaveGain() const { return waveGain; }
+    void zoomGain (double factor)
+    {
+        const auto g = juce::jlimit (1.0, 512.0, waveGain * factor);
+        if (g != waveGain)
+        {
+            waveGain = g;
+            changed();
+        }
+    }
+
     juce::int64 getCursor() const { return cursor; }
     void setCursor (juce::int64 s)
     {
@@ -107,6 +137,20 @@ public:
 
 private:
     void changed() { sendSynchronousChangeMessage(); }
+
+    void setFreqRange (double lo, double range)
+    {
+        range = juce::jlimit (0.02, 1.0, range);
+        lo = juce::jlimit (0.0, 1.0 - range, lo);
+        if (lo != freqLo || lo + range != freqHi)
+        {
+            freqLo = lo;
+            freqHi = lo + range;
+            changed();
+        }
+    }
+
+    double freqLo = 0.0, freqHi = 1.0, waveGain = 1.0;
 
     juce::int64 numSamples = 0;
     double sampleRate = 48000.0;

@@ -39,7 +39,6 @@ SpectrogramRenderer::SpectrogramRenderer()
 
     fftData.resize ((size_t) fftSize * 2);
     mags.resize ((size_t) fftSize / 2 + 1);
-    lut = theme::makeSpectrogramLut();
 
     startThread();
 }
@@ -110,6 +109,12 @@ void SpectrogramRenderer::render (const Params& p)
     if (p.audio == nullptr || p.width <= 0 || p.laneHeight <= 0)
         return;
 
+    if (p.scheme != lutScheme)
+    {
+        lut = theme::makeSpectrogramLut (p.scheme);
+        lutScheme = p.scheme;
+    }
+
     const auto& buffer = p.audio->buffer;
     const auto numChannels = buffer.getNumChannels();
     const auto numSamples = (juce::int64) buffer.getNumSamples();
@@ -153,8 +158,9 @@ void SpectrogramRenderer::render (const Params& p)
     std::vector<RowMap> rows ((size_t) p.laneHeight);
     for (int y = 0; y < p.laneHeight; ++y)
     {
-        const auto fTop = normToFreq (1.0 - (double) y / p.laneHeight, sampleRate);
-        const auto fBot = normToFreq (1.0 - (double) (y + 1) / p.laneHeight, sampleRate);
+        const auto range = p.normHi - p.normLo;
+        const auto fTop = normToFreq (p.normLo + (1.0 - (double) y / p.laneHeight) * range, sampleRate);
+        const auto fBot = normToFreq (p.normLo + (1.0 - (double) (y + 1) / p.laneHeight) * range, sampleRate);
         auto& r = rows[(size_t) y];
         r.lo = juce::jlimit (0, maxBin, (int) std::floor (fBot / binHz));
         r.hi = juce::jlimit (0, maxBin, (int) std::ceil (fTop / binHz));

@@ -145,6 +145,49 @@ void CycleModel::setRange (int index, juce::int64 start, juce::int64 end)
     changed();
 }
 
+int CycleModel::update (int index, juce::int64 start, juce::int64 end, int type)
+{
+    if (index < 0 || index >= size())
+        return -1;
+    if (end < start)
+        std::swap (start, end);
+
+    pushUndo();
+    cycles[(size_t) index] = { start, end, type };
+    sortCycles();
+
+    int found = 0;
+    for (int i = 0; i < size(); ++i)
+        if (cycles[(size_t) i].start == start && cycles[(size_t) i].end == end && cycles[(size_t) i].type == type)
+            found = i;
+    changed();
+    return found;
+}
+
+void CycleModel::setRangeLive (int index, juce::int64 start, juce::int64 end)
+{
+    if (index < 0 || index >= size())
+        return;
+    cycles[(size_t) index].start = start;
+    cycles[(size_t) index].end = end;
+    changed();
+}
+
+int CycleModel::finishEdit (int index)
+{
+    if (index < 0 || index >= size())
+        return -1;
+
+    const auto c = cycles[(size_t) index];
+    sortCycles();
+    int found = index;
+    for (int i = 0; i < size(); ++i)
+        if (cycles[(size_t) i].start == c.start && cycles[(size_t) i].end == c.end && cycles[(size_t) i].type == c.type)
+            found = i;
+    changed();
+    return found;
+}
+
 void CycleModel::remove (const juce::Array<int>& indices)
 {
     if (indices.isEmpty())

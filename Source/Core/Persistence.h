@@ -7,7 +7,10 @@ namespace wt
 /** App data lives in %APPDATA%\WaveTagger (never next to the audio, which may sit in a synced Drive folder). */
 inline juce::File getAppDataDir()
 {
-    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("WaveTagger");
+    // WT_APPDATA redirects all settings / projects / index so automated checks never touch the real ones
+    const auto override = juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {});
+    auto dir = override.isNotEmpty() ? juce::File (override)
+                                     : juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("WaveTagger");
     dir.createDirectory();
     return dir;
 }

@@ -70,6 +70,12 @@ void WaveView::setFloorDb (float db)
     requestSpectrogram();
 }
 
+void WaveView::setColourScheme (int scheme)
+{
+    colourScheme = scheme;
+    requestSpectrogram();
+}
+
 juce::Rectangle<int> WaveView::getLanesArea() const
 {
     return getLocalBounds().withTrimmedLeft (leftStrip).withTrimmedRight (rightAxis).withTrimmedBottom (rulerHeight);
@@ -86,6 +92,46 @@ juce::Rectangle<int> WaveView::getLaneBounds (int channel) const
     const auto area = getLanesArea();
     const auto h = getLaneHeight();
     return { area.getX(), area.getY() + channel * (h + laneGap), area.getWidth(), h };
+}
+
+int WaveView::laneIndexAt (float y) const
+{
+    const auto n = audio != nullptr ? audio->getNumChannels() : 1;
+    for (int ch = 0; ch < n; ++ch)
+        if (y < (float) getLaneBounds (ch).getBottom() + (float) laneGap * 0.5f)
+            return ch;
+    return n - 1;
+}
+
+WaveView::Zone WaveView::zoneAt (juce::Point<float> p) const
+{
+    const auto lanes = getLanesArea();
+    if (p.y < (float) lanes.getY() || p.y >= (float) (lanes.getBottom() + rulerHeight))
+        return Zone::Other;
+
+    if (p.x >= (float) lanes.getX() && p.x < (float) lanes.getRight())
+        return Zone::Wave;
+
+    if (p.y >= (float) lanes.getBottom())
+        return Zone::Other;
+
+    if (p.x >= (float) lanes.getRight() && p.x < (float) (lanes.getRight() + dbAxisWidth))
+        return Zone::DbAxis;
+    if (p.x >= (float) (lanes.getRight() + dbAxisWidth))
+        return Zone::FreqAxis;
+    return Zone::Other;
+}
+
+double WaveView::yToNorm (juce::Rectangle<int> lane, float y) const
+{
+    const auto rel = 1.0 - (double) (y - (float) lane.getY()) / (double) lane.getHeight();
+    return view.getFreqLo() + rel * (view.getFreqHi() - view.getFreqLo());
+}
+
+float WaveView::normToY (juce::Rectangle<int> lane, double norm) const
+{
+    const auto rel = (norm - view.getFreqLo()) / (view.getFreqHi() - view.getFreqLo());
+    return (float) lane.getBottom() - (float) rel * (float) lane.getHeight();
 }
 
 float WaveView::sampleToX (double sample) const
@@ -124,6 +170,9 @@ void WaveView::requestSpectrogram()
     p.width = getLanesArea().getWidth() + 2;
     p.laneHeight = getLaneHeight();
     p.floorDb = floorDb;
+    p.normLo = view.getFreqLo();
+    p.normHi = view.getFreqHi();
+    p.scheme = colourScheme;
     spectrogram.request (p);
 }
 
@@ -155,6 +204,7 @@ void WaveView::paint (juce::Graphics& g)
         if (waveAlpha > 0.0f)
             drawWaveform (g, ch, lane, waveAlpha);
 
+        drawDbAxis (g, lane);
         drawFrequencyAxis (g, lane);
 
         g.setColour (theme::textDim);
@@ -199,9 +249,12 @@ void WaveView::drawSpectrogram (juce::Graphics& g)
 void WaveView::drawWaveform (juce::Graphics& g, int channel, juce::Rectangle<int> lane, float alpha)
 {
     const auto mid = (float) lane.getCentreY();
-    const auto half = (float) lane.getHeight() * 0.5f * 0.96f;
+    const auto half = (float) lane.getHeight() * 0.5f * 0.96f * (float) view.getWaveGain();
     const auto spp = view.getSamplesPerPixel();
     const auto viewStart = view.getViewStart();
+
+    juce::Graphics::ScopedSaveState clipState (g);
+    g.reduceClipRegion (lane);
 
     g.setColour (theme::waveform.withAlpha (alpha * 0.35f));
     g.drawHorizontalLine ((int) mid, (float) lane.getX(), (float) lane.getRight());
@@ -334,33 +387,91 @@ void WaveView::showCycleMenu (int cycleIndex)
     });
 }
 
-void WaveView::drawFrequencyAxis (juce::Graphics& g, juce::Rectangle<int> lane)
+void WaveView::drawDbAxis (juce::Graphics& g, juce::Rectangle<int> lane)
 {
-    static const double freqs[] = { 100, 300, 500, 1000, 1500, 2000, 3000, 5000, 7000, 10000, 15000, 20000, 30000, 40000 };
-    const auto sr = audio->sampleRate;
-    const auto x = lane.getRight();
+    const auto x0 = lane.getRight();
+    const auto mid = (float) lane.getCentreY();
+    const auto half = (float) lane.getHeight() * 0.5f * 0.96f * (float) view.getWaveGain();
+
+    g.setColour (theme::outline);
+    g.drawVerticalLine (x0, (float) lane.getY(), (float) lane.getBottom());
+
+    static const float dbs[] = { 0, -1, -2, -3, -4, -6, -8, -10, -12, -15, -18, -20, -24, -30, -36, -42, -48, -60, -72, -90 };
 
     g.setFont (juce::FontOptions (10.5f));
-    for (auto f : freqs)
+    float lastY = (float) lane.getY();
+    for (auto db : dbs)
     {
-        if (f > sr * 0.5 * 0.97)
-            break;
-
-        const auto y = (float) lane.getBottom() - SpectrogramRenderer::freqToNorm (f, sr) * (float) lane.getHeight();
-        if (y < (float) lane.getY() + 6.0f)
+        const auto amp = std::pow (10.0f, db / 20.0f);
+        const auto y = mid - amp * half;
+        if (y < (float) lane.getY() + 7.0f || y > mid - 8.0f || y - lastY < 14.0f)
             continue;
 
+        lastY = y;
+        g.setColour (theme::outline);
+        g.drawHorizontalLine ((int) y, (float) x0, (float) x0 + 5.0f);
+        g.drawHorizontalLine ((int) (mid + (mid - y)), (float) x0, (float) x0 + 3.0f);
+
+        g.setColour (theme::textDim);
+        g.drawText (db == 0 ? juce::String ("0") : juce::String ((int) db),
+                    juce::Rectangle<float> ((float) x0 + 7.0f, y - 7.0f, (float) dbAxisWidth - 9.0f, 14.0f), juce::Justification::centredLeft);
+    }
+
+    g.setColour (theme::textDim.withAlpha (0.7f));
+    g.drawText ("dB", juce::Rectangle<int> (x0 + 7, lane.getBottom() - 16, dbAxisWidth - 9, 14), juce::Justification::centredLeft);
+}
+
+void WaveView::drawFrequencyAxis (juce::Graphics& g, juce::Rectangle<int> lane)
+{
+    const auto sr = audio->sampleRate;
+    const auto x = lane.getRight() + dbAxisWidth;
+    const auto range = view.getFreqHi() - view.getFreqLo();
+
+    g.setColour (theme::outline);
+    g.drawVerticalLine (x, (float) lane.getY(), (float) lane.getBottom());
+
+    std::vector<double> mults { 1, 2, 3, 5, 7 };
+    if (range < 0.5)
+        for (double m : { 1.5, 4.0, 6.0, 8.0, 9.0 })
+            mults.push_back (m);
+    if (range < 0.2)
+        for (double m : { 1.2, 1.4, 1.6, 1.8, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5 })
+            mults.push_back (m);
+
+    std::vector<double> freqs;
+    for (double decade : { 10.0, 100.0, 1000.0, 10000.0 })
+        for (auto m : mults)
+            if (decade * m <= sr * 0.5 * 0.99)
+                freqs.push_back (decade * m);
+    std::sort (freqs.begin(), freqs.end());
+
+    g.setFont (juce::FontOptions (10.5f));
+    float lastY = (float) lane.getBottom() + 100.0f;
+    for (auto f : freqs)
+    {
+        const auto y = normToY (lane, SpectrogramRenderer::freqToNorm (f, sr));
+        if (y < (float) lane.getY() + 7.0f || y > (float) lane.getBottom() - 6.0f || lastY - y < 22.0f)
+            continue;
+
+        lastY = y;
         g.setColour (theme::outline);
         g.drawHorizontalLine ((int) y, (float) x, (float) x + 5.0f);
 
         juce::String label;
         if (f >= 1000)
-            label = (std::fmod (f, 1000.0) == 0.0 ? juce::String ((int) (f / 1000)) : juce::String (f / 1000.0, 1)) + "k";
+            label = juce::String (f / 1000.0, std::fmod (f, 1000.0) == 0.0 ? 0 : (std::fmod (f * 10.0, 1000.0) == 0.0 ? 1 : 2)) + "k";
         else
-            label = juce::String ((int) f);
+            label = juce::String (f, std::fmod (f, 1.0) == 0.0 ? 0 : 1);
 
         g.setColour (theme::textDim);
-        g.drawText (label, juce::Rectangle<float> ((float) x + 7.0f, y - 7.0f, (float) rightAxis - 9.0f, 14.0f), juce::Justification::centredLeft);
+        g.drawText (label, juce::Rectangle<float> ((float) x + 7.0f, y - 7.0f, (float) freqAxisWidth - 9.0f, 14.0f), juce::Justification::centredLeft);
+    }
+
+    if (view.getFreqHi() - view.getFreqLo() < 0.999)
+    {
+        g.setColour (theme::accent);
+        g.setFont (juce::FontOptions (10.0f));
+        g.drawText ("Hz", juce::Rectangle<int> (x + 7, lane.getBottom() - 16, freqAxisWidth - 9, 14), juce::Justification::centredLeft);
     }
 }
 
@@ -423,16 +534,89 @@ void WaveView::drawRuler (juce::Graphics& g)
     }
 
     g.setColour (theme::textDim);
-    g.drawText ("sec", ruler.withX (area.getRight()).withWidth (rightAxis), juce::Justification::centred);
+    g.drawText ("sec", ruler.withX (area.getRight() + dbAxisWidth).withWidth (freqAxisWidth), juce::Justification::centred);
 }
 
 //==============================================================================
+void WaveView::computeNeighbourBounds (int index, juce::int64& prev, juce::int64& next) const
+{
+    prev = 0;
+    next = view.getNumSamples();
+    const auto& c = (*cycles)[index];
+    for (int j = 0; j < cycles->size(); ++j)
+    {
+        if (j == index)
+            continue;
+        const auto& o = (*cycles)[j];
+        if (o.end <= c.start)
+            prev = juce::jmax (prev, o.end);
+        else if (o.start >= c.end)
+            next = juce::jmin (next, o.start);
+    }
+}
+
+WaveView::CycleHit WaveView::hitTestCycle (juce::Point<float> p) const
+{
+    CycleHit best;
+    if (cycles == nullptr || zoneAt (p) != Zone::Wave || p.y >= (float) getLanesArea().getBottom())
+        return best;
+
+    constexpr float tolerance = 5.0f;
+    float bestDist = tolerance + 0.01f;
+    for (int i = 0; i < cycles->size(); ++i)
+    {
+        const auto& c = (*cycles)[i];
+        const auto x1 = sampleToX ((double) c.start), x2 = sampleToX ((double) c.end);
+        if (x2 < p.x - tolerance || x1 > p.x + tolerance)
+            continue;
+
+        const auto d1 = std::abs (p.x - x1), d2 = std::abs (p.x - x2);
+        if (d1 < bestDist)
+        {
+            bestDist = d1;
+            best = { i, -1 };
+        }
+        if (d2 < bestDist)
+        {
+            bestDist = d2;
+            best = { i, 1 };
+        }
+        if (best.index < 0 && p.x > x1 && p.x < x2)
+            best = { i, 0 };
+    }
+    return best;
+}
+
+void WaveView::mouseMove (const juce::MouseEvent& e)
+{
+    if (audio == nullptr)
+        return;
+
+    const auto hit = hitTestCycle (e.position);
+    if (hit.index >= 0 && hit.edge != 0)
+        setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+    else if (hit.index >= 0 && e.mods.isAltDown())
+        setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    else
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+}
+
+void WaveView::mouseExit (const juce::MouseEvent&)
+{
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+}
+
 void WaveView::mouseDown (const juce::MouseEvent& e)
 {
     if (auto* parent = getParentComponent())
         parent->grabKeyboardFocus();
 
-    if (audio == nullptr)
+    dragMode = DragMode::None;
+    editStarted = false;
+    editIndex = -1;
+    justDoubleClicked = false;
+
+    if (audio == nullptr || zoneAt (e.position) != Zone::Wave)
         return;
 
     const auto s = xToSample (e.position.x);
@@ -446,6 +630,19 @@ void WaveView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    const auto hit = hitTestCycle (e.position);
+    if (hit.index >= 0 && (hit.edge != 0 || e.mods.isAltDown()))
+    {
+        editIndex = hit.index;
+        origStart = (*cycles)[hit.index].start;
+        origEnd = (*cycles)[hit.index].end;
+        dragAnchor = s;
+        computeNeighbourBounds (hit.index, prevLimit, nextLimit);
+        dragMode = hit.edge < 0 ? DragMode::EdgeStart : hit.edge > 0 ? DragMode::EdgeEnd : DragMode::Move;
+        return;
+    }
+
+    dragMode = DragMode::Select;
     if (e.mods.isShiftDown())
     {
         if (view.hasSelection())
@@ -472,6 +669,38 @@ void WaveView::mouseDrag (const juce::MouseEvent& e)
 
     lastMouseX = e.position.x;
 
+    if (dragMode == DragMode::EdgeStart || dragMode == DragMode::EdgeEnd || dragMode == DragMode::Move)
+    {
+        const auto minLen = juce::jmax<juce::int64> (1, (juce::int64) (audio->sampleRate * 0.001));
+        const auto s = xToSample (e.position.x);
+        auto ns = origStart, ne = origEnd;
+
+        if (dragMode == DragMode::EdgeStart)
+            ns = juce::jlimit (prevLimit, origEnd - minLen, s);
+        else if (dragMode == DragMode::EdgeEnd)
+            ne = juce::jlimit (origStart + minLen, nextLimit, s);
+        else
+        {
+            const auto delta = juce::jlimit (prevLimit - origStart, nextLimit - origEnd, s - dragAnchor);
+            ns = origStart + delta;
+            ne = origEnd + delta;
+        }
+
+        if (ns == (*cycles)[editIndex].start && ne == (*cycles)[editIndex].end)
+            return;
+
+        if (! editStarted)
+        {
+            cycles->beginEdit();
+            editStarted = true;
+        }
+        cycles->setRangeLive (editIndex, ns, ne);
+        return;
+    }
+
+    if (dragMode != DragMode::Select)
+        return;
+
     if (! dragging && std::abs (e.getDistanceFromDragStartX()) < 3)
         return;
 
@@ -488,8 +717,34 @@ void WaveView::mouseDrag (const juce::MouseEvent& e)
 void WaveView::mouseUp (const juce::MouseEvent& e)
 {
     stopTimer();
+
+    const auto mode = dragMode;
+    dragMode = DragMode::None;
+
     if (audio == nullptr || e.mods.isPopupMenu())
         return;
+
+    if (mode == DragMode::EdgeStart || mode == DragMode::EdgeEnd || mode == DragMode::Move)
+    {
+        if (editStarted)
+        {
+            const auto idx = cycles->finishEdit (editIndex);
+            if (onCycleEdited)
+                onCycleEdited (idx);
+        }
+        editStarted = false;
+        return;
+    }
+
+    if (mode != DragMode::Select)
+        return;
+
+    if (justDoubleClicked)
+    {
+        justDoubleClicked = false;
+        dragging = false;
+        return;
+    }
 
     if (! dragging)
     {
@@ -511,6 +766,21 @@ void WaveView::mouseUp (const juce::MouseEvent& e)
     dragging = false;
 }
 
+void WaveView::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (audio == nullptr || cycles == nullptr || zoneAt (e.position) != Zone::Wave)
+        return;
+
+    const auto hit = hitTestCycle (e.position);
+    const auto idx = hit.index >= 0 ? hit.index : cycles->findAt (xToSample (e.position.x));
+    if (idx < 0)
+        return;
+
+    justDoubleClicked = true;
+    if (onCycleDoubleClicked)
+        onCycleDoubleClicked (idx);
+}
+
 void WaveView::timerCallback()
 {
     const auto area = getLanesArea();
@@ -526,19 +796,32 @@ void WaveView::timerCallback()
 
 void WaveView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
-    if (audio == nullptr)
+    if (audio == nullptr || wheelMap == nullptr)
         return;
 
-    const auto px = (double) (e.position.x - (float) getLanesArea().getX());
+    const auto zone = zoneAt (e.position);
+    if (zone == Zone::Other)
+        return;
 
-    if (e.mods.isCtrlDown() || e.mods.isCommandDown())
+    const auto ctx = zone == Zone::FreqAxis ? WheelContext::FreqAxis : zone == Zone::DbAxis ? WheelContext::DbAxis : WheelContext::Wave;
+    const auto action = wheelMap->get (ctx, WheelMap::modKeyFor (e.mods));
+    const auto dy = (double) (wheel.deltaY != 0.0f ? wheel.deltaY : wheel.deltaX);
+    const auto lanesArea = getLanesArea();
+    const auto px = juce::jlimit (0.0, (double) lanesArea.getWidth(), (double) (e.position.x - (float) lanesArea.getX()));
+
+    switch (action)
     {
-        view.zoomAround (px, std::pow (0.5, (double) wheel.deltaY * 4.0));
-    }
-    else
-    {
-        const auto delta = wheel.deltaX != 0.0f ? wheel.deltaX : wheel.deltaY;
-        view.scrollPixels (-(double) delta * getLanesArea().getWidth() * 0.5);
+        case WheelAction::TimeZoom:   view.zoomAround (px, std::pow (0.5, dy * 4.0)); break;
+        case WheelAction::TimeScroll: view.scrollPixels (-dy * lanesArea.getWidth() * 0.5); break;
+        case WheelAction::FreqZoom:
+        {
+            const auto lane = getLaneBounds (laneIndexAt (e.position.y));
+            view.zoomFreqAround (yToNorm (lane, juce::jlimit ((float) lane.getY(), (float) lane.getBottom(), e.position.y)), std::pow (0.5, dy * 4.0));
+            break;
+        }
+        case WheelAction::FreqScroll: view.scrollFreq (dy * (view.getFreqHi() - view.getFreqLo()) * 0.5); break;
+        case WheelAction::GainZoom:   view.zoomGain (std::pow (2.0, dy * 4.0)); break;
+        default: break;
     }
 }
 

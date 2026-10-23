@@ -53,6 +53,13 @@ public:
     int add (juce::int64 start, juce::int64 end, int type);
     void setType (const juce::Array<int>& indices, int type);
     void setRange (int index, juce::int64 start, juce::int64 end);
+    /** Replace range and type in one undo step; returns the new index. */
+    int update (int index, juce::int64 start, juce::int64 end, int type);
+
+    /** Drag editing: beginEdit() once (one undo step), setRangeLive() while dragging, finishEdit() to re-sort. */
+    void beginEdit() { pushUndo(); }
+    void setRangeLive (int index, juce::int64 start, juce::int64 end);
+    int finishEdit (int index);
     void remove (const juce::Array<int>& indices);
     void replaceAll (std::vector<Cycle> newCycles, bool undoable = true);
 

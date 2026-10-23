@@ -28,11 +28,13 @@ public:
         int width = 0;
         int laneHeight = 0;
         float floorDb = -110.0f;
+        double normLo = 0.0, normHi = 1.0; // visible part of the (mel-scaled) frequency axis
+        int scheme = 0;
 
         bool sameLayout (const Params& o) const
         {
-            return audio == o.audio && samplesPerPixel == o.samplesPerPixel
-                && laneHeight == o.laneHeight && floorDb == o.floorDb;
+            return audio == o.audio && samplesPerPixel == o.samplesPerPixel && laneHeight == o.laneHeight
+                && floorDb == o.floorDb && normLo == o.normLo && normHi == o.normHi && scheme == o.scheme;
         }
     };
 
@@ -75,6 +77,7 @@ private:
     std::vector<float> window, fftData, mags;
     float amplitudeScale = 1.0f;
     std::array<juce::PixelARGB, 256> lut;
+    int lutScheme = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrogramRenderer)
 };
