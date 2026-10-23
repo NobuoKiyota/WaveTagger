@@ -21,6 +21,10 @@ struct ExportResult
     // Normalisation: the gains that were applied and how many were stopped by the ceiling / max gain
     double minGainDb = 0.0, maxGainDb = 0.0;
     int gainLimited = 0;
+
+    // Hum removal: the mains frequency that was found (0 = none) and how many harmonics were notched
+    double humHz = 0.0;
+    int humNotches = 0;
 };
 
 /** Writes each region as a 24-bit WAV (source rate / channels) with a short fade at both edges. Never overwrites.

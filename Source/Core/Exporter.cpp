@@ -13,12 +13,14 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
     // Stage A runs once over the whole recording (filters need the run-up), on a copy
     juce::AudioBuffer<float> filtered;
     const auto* source = &audio.buffer;
+    ConditionReport fileReport;
     if (conditioning.needsFile())
     {
         filtered.makeCopyOf (audio.buffer);
-        ConditionReport fileReport;
         conditionFile (filtered, audio.sampleRate, conditioning, fileReport);
         source = &filtered;
+        result.humHz = fileReport.humHz;
+        result.humNotches = fileReport.humNotches;
     }
 
     bool firstGain = true;
@@ -57,6 +59,9 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
 
         ConditionReport report;
         conditionCycle (segment, audio.sampleRate, conditioning, report);
+        report.dcOffset = fileReport.dcOffset;
+        report.humHz = fileReport.humHz;
+        report.humNotches = fileReport.humNotches;
         if (conditioning.normalize != NormalizeMode::off)
         {
             result.minGainDb = firstGain ? report.gainDb : juce::jmin (result.minGainDb, report.gainDb);

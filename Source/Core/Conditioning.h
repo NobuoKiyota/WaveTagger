@@ -11,10 +11,24 @@ enum class NormalizeMode
     lufs  // target is integrated loudness in LUFS (BS.1770, gated)
 };
 
+enum class HumMode
+{
+    off,
+    automatic, // looks for 50 Hz and 60 Hz mains hum and only acts if one of them is clearly there
+    mains50,   // forced system: only that one is looked for, but a single clear harmonic is enough
+    mains60
+};
+
 /** Everything defaults to "off": an untouched ConditionOptions leaves the audio bit-exact. */
 struct ConditionOptions
 {
     bool dcRemove = false;
+
+    HumMode humMode = HumMode::off;
+    int humHarmonics = 8;           // harmonics 1..N of the mains frequency are examined
+    double humProminenceDb = 10.0;  // a harmonic counts if it stands this far above its neighbourhood
+    double humQ = 30.0;             // notch width: -3 dB bandwidth is frequency / Q
+
     float lowCutHz = 0.0f; // 0 = off
     int lowCutOrder = 2;   // 2 or 4 (Butterworth, single pass: no latency, length unchanged)
 
@@ -26,20 +40,33 @@ struct ConditionOptions
     bool dither = true; // TPDF, only when writing 16-bit and something above was applied
 
     /** Stage A: needs the whole recording (filters need run-up, so they run before cutting). */
-    bool needsFile() const { return dcRemove || lowCutHz > 0.0f; }
+    bool needsFile() const { return dcRemove || humMode != HumMode::off || lowCutHz > 0.0f; }
     bool active() const { return needsFile() || normalize != NormalizeMode::off; }
 };
 
 struct ConditionReport
 {
     double dcOffset = 0.0; // largest per-channel mean that was removed
+    double humHz = 0.0;    // 50 or 60 when hum was found and notched, otherwise 0
+    int humNotches = 0;
     double peakBeforeDb = -240.0, peakAfterDb = -240.0;
     double lufsBefore = -240.0; // only measured for NormalizeMode::lufs
     double gainDb = 0.0;
     bool gainLimited = false; // the ceiling or maxGainDb stopped the gain short of the target
 };
 
-/** Stage A, in place: DC removal, then low cut. The length never changes. */
+struct HumDetection
+{
+    double mainsHz = 0.0;                // 50 or 60; 0 = no hum found
+    std::vector<double> notchHz;         // measured frequency of every harmonic that stood out (follows mains drift)
+    std::vector<double> prominenceDb;    // how far each one stood out
+};
+
+/** Looks at the quietest fifth of the recording (the noise floor between the sounds) with a long FFT and checks the
+    harmonics of 50 / 60 Hz. Recordings shorter than ~0.35 s are not analysed. Never modifies the buffer. */
+HumDetection detectHum (const juce::AudioBuffer<float>& buffer, double sampleRate, const ConditionOptions& options);
+
+/** Stage A, in place: DC removal, then hum notches, then low cut. The length never changes. */
 void conditionFile (juce::AudioBuffer<float>& buffer, double sampleRate, const ConditionOptions& options, ConditionReport& report);
 
 /** Stage B, in place, on one already-cut cycle: normalisation. */

@@ -1,5 +1,7 @@
 #include "Conditioning.h"
 
+#include <juce_dsp/juce_dsp.h>
+
 namespace wt
 {
 namespace
@@ -32,6 +34,22 @@ struct Biquad
         f.b1 = -(1.0 + cosw) / a0;
         f.b2 = f.b0;
         f.a1 = -2.0 * cosw / a0;
+        f.a2 = (1.0 - alpha) / a0;
+        return f;
+    }
+
+    static Biquad notch (double sampleRate, double freq, double q)
+    {
+        const auto w0 = juce::MathConstants<double>::twoPi * freq / sampleRate;
+        const auto cosw = std::cos (w0);
+        const auto alpha = std::sin (w0) / (2.0 * q);
+        const auto a0 = 1.0 + alpha;
+
+        Biquad f;
+        f.b0 = 1.0 / a0;
+        f.b1 = -2.0 * cosw / a0;
+        f.b2 = f.b0;
+        f.a1 = f.b1;
         f.a2 = (1.0 - alpha) / a0;
         return f;
     }
@@ -91,27 +109,13 @@ void removeDc (juce::AudioBuffer<float>& buffer, ConditionReport& report)
     }
 }
 
-void lowCut (juce::AudioBuffer<float>& buffer, double sampleRate, float cutoff, int order)
+/** Runs the cascade over every channel, in place. The filters first run on the first sample for `warmUp` samples so a
+    recording that starts away from zero does not click. */
+void runCascade (juce::AudioBuffer<float>& buffer, const std::vector<Biquad>& proto, int warmUp)
 {
     const auto n = buffer.getNumSamples();
-    if (n == 0)
+    if (n == 0 || proto.empty())
         return;
-
-    const auto freq = juce::jlimit (1.0, sampleRate * 0.25, (double) cutoff);
-    // Butterworth: one section at Q 1/sqrt(2), or two at these Qs for 4th order
-    std::vector<Biquad> proto;
-    if (order >= 4)
-    {
-        proto.push_back (Biquad::highPass (sampleRate, freq, 0.5411961001461970));
-        proto.push_back (Biquad::highPass (sampleRate, freq, 1.3065629648763766));
-    }
-    else
-    {
-        proto.push_back (Biquad::highPass (sampleRate, freq, 0.7071067811865476));
-    }
-
-    // Run-up on the first sample so a recording that starts away from zero does not click
-    const auto warmUp = (int) juce::jmin (sampleRate * 10.0, sampleRate * 8.0 / freq);
 
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
@@ -133,7 +137,211 @@ void lowCut (juce::AudioBuffer<float>& buffer, double sampleRate, float cutoff, 
         }
     }
 }
+
+void lowCut (juce::AudioBuffer<float>& buffer, double sampleRate, float cutoff, int order)
+{
+    const auto freq = juce::jlimit (1.0, sampleRate * 0.25, (double) cutoff);
+    // Butterworth: one section at Q 1/sqrt(2), or two at these Qs for 4th order
+    std::vector<Biquad> sections;
+    if (order >= 4)
+    {
+        sections.push_back (Biquad::highPass (sampleRate, freq, 0.5411961001461970));
+        sections.push_back (Biquad::highPass (sampleRate, freq, 1.3065629648763766));
+    }
+    else
+    {
+        sections.push_back (Biquad::highPass (sampleRate, freq, 0.7071067811865476));
+    }
+
+    runCascade (buffer, sections, (int) juce::jmin (sampleRate * 10.0, sampleRate * 8.0 / freq));
+}
+
+void notchHum (juce::AudioBuffer<float>& buffer, double sampleRate, const std::vector<double>& freqs, double q)
+{
+    std::vector<Biquad> sections;
+    double lowest = freqs.empty() ? 50.0 : freqs.front();
+    for (const auto f : freqs)
+    {
+        sections.push_back (Biquad::notch (sampleRate, f, q));
+        lowest = juce::jmin (lowest, f);
+    }
+
+    // a notch rings for about tau = q / (pi f) seconds
+    const auto tau = q / (juce::MathConstants<double>::pi * lowest);
+    const auto warmUp = (int) juce::jmin (sampleRate * 10.0, sampleRate * 8.0 * tau);
+
+    // The hum is already there at the first sample, so a filter that starts there needs a few tau to settle. The head is
+    // therefore also run backwards in time (where sample 0 is the *end* of the run and is clean) and the two results are
+    // cross-faded: the forward one takes over once its start-up has died away, the backward one has its own at the other end.
+    const auto n = buffer.getNumSamples();
+    const auto head = juce::jmin (n, (int) (sampleRate * 10.0 * tau));
+    juce::AudioBuffer<float> backward (buffer.getNumChannels(), head);
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        for (int i = 0; i < head; ++i)
+            backward.setSample (ch, i, buffer.getSample (ch, head - 1 - i));
+
+    runCascade (backward, sections, warmUp);
+    runCascade (buffer, sections, warmUp);
+
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        for (int i = 0; i < head; ++i)
+        {
+            const auto w = head > 1 ? 0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * i / (head - 1)) : 1.0;
+            buffer.setSample (ch, i, (float) (w * buffer.getSample (ch, i) + (1.0 - w) * backward.getSample (ch, head - 1 - i)));
+        }
+}
 } // namespace
+
+HumDetection detectHum (const juce::AudioBuffer<float>& buffer, double sampleRate, const ConditionOptions& options)
+{
+    HumDetection result;
+    if (options.humMode == HumMode::off || buffer.getNumChannels() == 0)
+        return result;
+
+    const auto total = buffer.getNumSamples();
+    int order = 17; // 0.37 Hz per bin at 48 kHz
+    while (order > 14 && (1 << order) > total)
+        --order;
+
+    const auto n = 1 << order;
+    if (total < n)
+        return result;
+
+    const auto hop = n / 2;
+    const auto channels = buffer.getNumChannels();
+    const auto binHz = sampleRate / n;
+
+    struct Frame
+    {
+        int start;
+        double energy;
+    };
+    std::vector<Frame> frames;
+    for (int s = 0; s + n <= total; s += hop)
+    {
+        double e = 0.0;
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            const auto* d = buffer.getReadPointer (ch) + s;
+            for (int i = 0; i < n; ++i)
+                e += (double) d[i] * d[i];
+        }
+        frames.push_back ({ s, e });
+    }
+
+    // The quietest fifth is where the noise floor (and so the hum) shows up undisturbed by the sound itself
+    const auto used = juce::jmax<size_t> (1, frames.size() / 5);
+    std::partial_sort (frames.begin(), frames.begin() + (std::ptrdiff_t) used, frames.end(),
+                       [] (const Frame& a, const Frame& b) { return a.energy < b.energy; });
+
+    juce::dsp::FFT fft (order);
+    std::vector<float> window ((size_t) n), data ((size_t) n * 2);
+    for (int i = 0; i < n; ++i)
+        window[(size_t) i] = 0.5f - 0.5f * (float) std::cos (juce::MathConstants<double>::twoPi * i / n);
+
+    const auto bins = n / 2 + 1;
+    std::vector<double> power ((size_t) bins, 0.0);
+    for (size_t f = 0; f < used; ++f)
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            const auto* d = buffer.getReadPointer (ch) + frames[f].start;
+            std::fill (data.begin(), data.end(), 0.0f);
+            for (int i = 0; i < n; ++i)
+                data[(size_t) i] = d[i] * window[(size_t) i];
+            fft.performRealOnlyForwardTransform (data.data(), true);
+            for (int k = 0; k < bins; ++k)
+                power[(size_t) k] += (double) data[(size_t) k * 2] * data[(size_t) k * 2] + (double) data[(size_t) k * 2 + 1] * data[(size_t) k * 2 + 1];
+        }
+
+    struct Harmonic
+    {
+        int number;
+        double hz, prominenceDb;
+        bool exclusive;
+    };
+
+    // Every harmonic of f0 that stands out of the spectrum around it; hum drifts a little, so the peak is measured
+    const auto analyse = [&] (double f0, int sharedStep) {
+        std::vector<Harmonic> found;
+        const auto searchHz = juce::jmax (1.0, binHz * 1.5);
+        for (int h = 1; h <= options.humHarmonics; ++h)
+        {
+            const auto expected = f0 * h;
+            if (expected > sampleRate * 0.4)
+                break;
+
+            const auto lo = juce::jmax (3, (int) std::floor ((expected - searchHz) / binHz));
+            const auto hi = juce::jmin (bins - 2, (int) std::ceil ((expected + searchHz) / binHz));
+            if (hi <= lo)
+                continue;
+
+            int pk = lo;
+            for (int k = lo; k <= hi; ++k)
+                if (power[(size_t) k] > power[(size_t) pk])
+                    pk = k;
+
+            std::vector<double> around;
+            for (int k = juce::jmax (1, pk - 40); k <= juce::jmin (bins - 1, pk + 40); ++k)
+                if (std::abs (k - pk) >= 4)
+                    around.push_back (power[(size_t) k]);
+            if (around.size() < 8)
+                continue;
+
+            std::nth_element (around.begin(), around.begin() + (std::ptrdiff_t) around.size() / 2, around.end());
+            const auto median = around[around.size() / 2];
+            if (median <= 0.0 || power[(size_t) pk] <= 0.0)
+                continue;
+
+            const auto prominence = 10.0 * std::log10 (power[(size_t) pk] / median);
+            if (prominence < options.humProminenceDb)
+                continue;
+
+            // parabola through the log power of the three bins around the peak
+            const auto a = std::log (power[(size_t) pk - 1] + 1.0e-30), b = std::log (power[(size_t) pk]), c = std::log (power[(size_t) pk + 1] + 1.0e-30);
+            const auto denom = a - 2.0 * b + c;
+            const auto shift = denom < 0.0 ? juce::jlimit (-0.5, 0.5, 0.5 * (a - c) / denom) : 0.0;
+            found.push_back ({ h, (pk + shift) * binHz, prominence, h % sharedStep != 0 });
+        }
+        return found;
+    };
+
+    // 300 Hz is the 6th harmonic of 50 and the 5th of 60: harmonics that both share say nothing about which one it is
+    const auto sum = [] (const std::vector<Harmonic>& v) { double s = 0.0; for (const auto& h : v) s += h.prominenceDb; return s; };
+    const auto exclusiveCount = [] (const std::vector<Harmonic>& v) { return (int) std::count_if (v.begin(), v.end(), [] (const Harmonic& h) { return h.exclusive; }); };
+
+    std::vector<Harmonic> best;
+    double bestMains = 0.0;
+    const auto consider = [&] (double mains, int sharedStep, int needed) {
+        auto found = analyse (mains, sharedStep);
+        if (exclusiveCount (found) < needed)
+            return;
+        if (bestMains == 0.0 || exclusiveCount (found) > exclusiveCount (best)
+            || (exclusiveCount (found) == exclusiveCount (best) && sum (found) > sum (best)))
+        {
+            best = std::move (found);
+            bestMains = mains;
+        }
+    };
+
+    switch (options.humMode)
+    {
+        case HumMode::mains50:    consider (50.0, 6, 1); break;
+        case HumMode::mains60:    consider (60.0, 5, 1); break;
+        case HumMode::automatic:  consider (50.0, 6, 2); consider (60.0, 5, 2); break;
+        case HumMode::off:        break;
+    }
+
+    if (bestMains > 0.0)
+    {
+        result.mainsHz = bestMains;
+        for (const auto& h : best)
+        {
+            result.notchHz.push_back (h.hz);
+            result.prominenceDb.push_back (h.prominenceDb);
+        }
+    }
+    return result;
+}
 
 float samplePeak (const juce::AudioBuffer<float>& buffer)
 {
@@ -203,6 +411,18 @@ void conditionFile (juce::AudioBuffer<float>& buffer, double sampleRate, const C
     report = {};
     if (options.dcRemove)
         removeDc (buffer, report);
+
+    if (options.humMode != HumMode::off)
+    {
+        const auto hum = detectHum (buffer, sampleRate, options);
+        if (hum.mainsHz > 0.0)
+        {
+            notchHum (buffer, sampleRate, hum.notchHz, options.humQ);
+            report.humHz = hum.mainsHz;
+            report.humNotches = (int) hum.notchHz.size();
+        }
+    }
+
     if (options.lowCutHz > 0.0f)
         lowCut (buffer, sampleRate, options.lowCutHz, options.lowCutOrder);
 }
@@ -264,6 +484,8 @@ juce::String describeConditioning (const ConditionOptions& options, const Condit
     juce::StringArray parts;
     if (options.dcRemove)
         parts.add ("dc");
+    if (options.humMode != HumMode::off)
+        parts.add (report.humHz > 0.0 ? "hum" + juce::String (report.humHz, 0) + "Hz/" + juce::String (report.humNotches) : juce::String ("hum=none"));
     if (options.lowCutHz > 0.0f)
         parts.add ("lc" + juce::String (options.lowCutHz, 0) + "Hz/" + juce::String (options.lowCutOrder >= 4 ? 4 : 2));
 

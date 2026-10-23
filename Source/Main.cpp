@@ -1873,6 +1873,102 @@ private:
             check (step.getMagnitude (0, 0, 48000) < 1.0e-5f, "a recording that starts away from zero does not click");
         }
 
+        // ---- hum removal
+        {
+            const double sr = 48000.0;
+            // stereo: mains hum (+ harmonics) and a little noise throughout, two loud 1 kHz bursts
+            const auto humSignal = [&] (double seconds, double f0, const std::vector<double>& amps, bool bursts) {
+                juce::AudioBuffer<float> b (2, (int) (sr * seconds));
+                juce::Random rnd (31);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                    {
+                        double v = (rnd.nextFloat() - 0.5) * 0.004;
+                        for (size_t h = 0; h < amps.size(); ++h)
+                            v += amps[h] * std::sin (2.0 * pi * f0 * (double) (h + 1) * i / sr + 0.7 * (double) h);
+                        const auto t = i / sr;
+                        if (bursts && ((t >= 3.0 && t < 3.5) || (t >= 6.0 && t < 6.5)))
+                            v += 0.5 * std::sin (2.0 * pi * 1000.0 * i / sr);
+                        b.setSample (ch, i, (float) v);
+                    }
+                return b;
+            };
+            const auto level = [&] (const juce::AudioBuffer<float>& b, double freq, double fromSec, double toSec) {
+                double re = 0.0, im = 0.0;
+                const auto from = (int) (fromSec * sr), to = (int) (toSec * sr);
+                for (int i = from; i < to; ++i)
+                {
+                    re += b.getSample (0, i) * std::cos (2.0 * pi * freq * i / sr);
+                    im += b.getSample (0, i) * std::sin (2.0 * pi * freq * i / sr);
+                }
+                return 2.0 * std::sqrt (re * re + im * im) / (to - from);
+            };
+            const auto near = [] (const std::vector<double>& v, double hz, double tol) {
+                return std::any_of (v.begin(), v.end(), [&] (double x) { return std::abs (x - hz) < tol; });
+            };
+
+            ConditionOptions o;
+            o.humMode = HumMode::automatic;
+
+            const auto hum60 = humSignal (10.0, 60.0, { 0.01, 0.006, 0.004, 0.002 }, true);
+            const auto found = detectHum (hum60, sr, o);
+            check (found.mainsHz == 60.0 && found.notchHz.size() >= 4 && near (found.notchHz, 60.0, 0.3) && near (found.notchHz, 120.0, 0.3)
+                       && near (found.notchHz, 180.0, 0.3) && near (found.notchHz, 240.0, 0.3),
+                   "60 Hz hum and its harmonics are found automatically (not mistaken for 50 Hz)");
+
+            auto cleaned = hum60;
+            conditionFile (cleaned, sr, o, rep);
+            bool allDown = rep.humHz == 60.0 && rep.humNotches >= 4;
+            for (int h = 1; h <= 4; ++h)
+                allDown = allDown && level (hum60, 60.0 * h, 4.0, 10.0) / level (cleaned, 60.0 * h, 4.0, 10.0) > 31.6; // 30 dB
+            check (allDown, "every harmonic comes down by at least 30 dB");
+            check (std::abs (db (rms (cleaned, (int) (3.1 * sr), (int) (3.4 * sr))) - db (rms (hum60, (int) (3.1 * sr), (int) (3.4 * sr)))) < 0.05
+                       && cleaned.getNumSamples() == hum60.getNumSamples(),
+                   "the sound itself is untouched (< 0.05 dB) and the length is the same");
+            check (level (cleaned, 60.0, 0.0, 1.0) < level (hum60, 60.0, 0.0, 1.0) * 0.1, "it works from the very first second (no run-in at the start)");
+
+            const auto hum50 = humSignal (10.0, 50.0, { 0.008, 0.01, 0.005 }, true);
+            check (detectHum (hum50, sr, o).mainsHz == 50.0, "50 Hz hum is recognised as 50 Hz");
+
+            const auto drift = humSignal (10.0, 59.7, { 0.01, 0.006, 0.004 }, true);
+            auto driftClean = drift;
+            conditionFile (driftClean, sr, o, rep);
+            check (rep.humHz == 60.0 && level (drift, 59.7, 4.0, 10.0) / level (driftClean, 59.7, 4.0, 10.0) > 17.8,
+                   "hum that is not exactly 60 Hz is notched where it really is (-25 dB or better)");
+
+            auto noHum = humSignal (10.0, 60.0, {}, true);
+            const auto noHumBefore = noHum;
+            conditionFile (noHum, sr, o, rep);
+            check (rep.humHz == 0.0 && identical (noHum, noHumBefore), "no hum: nothing is found and the audio is bit-exact");
+
+            auto tone = humSignal (10.0, 100.0, { 0.05 }, true);
+            const auto toneBefore = tone;
+            conditionFile (tone, sr, o, rep);
+            check (rep.humHz == 0.0 && identical (tone, toneBefore), "a single steady tone is not taken for hum (needs two harmonics)");
+
+            auto shortOne = humSignal (0.2, 60.0, { 0.01, 0.006, 0.004 }, false);
+            const auto shortBefore = shortOne;
+            conditionFile (shortOne, sr, o, rep);
+            check (identical (shortOne, shortBefore), "a recording too short to analyse is left alone");
+
+            ConditionOptions forced;
+            forced.humMode = HumMode::mains60;
+            check (detectHum (hum50, sr, forced).mainsHz == 0.0, "forcing 60 Hz does not touch 50 Hz hum");
+            forced.humMode = HumMode::mains50;
+            const auto lonely = humSignal (10.0, 50.0, { 0.0, 0.01 }, true); // only the 100 Hz harmonic
+            check (detectHum (lonely, sr, forced).mainsHz == 50.0 && detectHum (lonely, sr, o).mainsHz == 0.0,
+                   "forcing 50 Hz needs a single clear harmonic, automatic needs two");
+
+            // the mains hum is noticed even when the recording is mostly sound: only the quietest fifth is looked at
+            // (the loud part buries this hum completely: only the quiet start can reveal it)
+            auto busy = humSignal (10.0, 60.0, { 0.003, 0.002, 0.0015 }, false);
+            juce::Random rnd (3);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = (int) (2.8 * sr); i < busy.getNumSamples(); ++i)
+                    busy.setSample (ch, i, busy.getSample (ch, i) + (rnd.nextFloat() - 0.5f) * 2.0f);
+            check (detectHum (busy, sr, o).mainsHz == 60.0, "hum is found from the quiet start of a mostly noisy recording");
+        }
+
         // ---- Peak / ceiling / max gain
         {
             ConditionOptions o;
@@ -2015,6 +2111,28 @@ private:
             base.getChildFile ("B/cond1.wav").loadFileAsData (raw);
             const std::string bytes ((const char*) raw.getData(), raw.getSize());
             check (bytes.find ("cond=dc,lc30Hz/2,norm=-1.0dBFS,gain=") != std::string::npos, "the applied chain is recorded in the WAV comment");
+
+            {
+                AudioData humData;
+                humData.sampleRate = 48000.0;
+                humData.bitsPerSample = 24;
+                humData.buffer.setSize (2, 48000 * 6);
+                juce::Random hr (5);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < humData.buffer.getNumSamples(); ++i)
+                        humData.buffer.setSample (ch, i, (float) ((hr.nextFloat() - 0.5) * 0.004 + 0.01 * std::sin (2.0 * pi * 60.0 * i / 48000.0)
+                                                                  + 0.006 * std::sin (2.0 * pi * 120.0 * i / 48000.0) + 0.004 * std::sin (2.0 * pi * 180.0 * i / 48000.0)));
+
+                ConditionOptions ho;
+                ho.humMode = HumMode::automatic;
+                const std::vector<ExportItem> humItems { { 0, 6 * 48000, "H", "hum", "" } };
+                const auto hr1 = exportCycles (humData, humItems, base, 24, 2.0f, ho);
+                juce::MemoryBlock hraw;
+                base.getChildFile ("H/hum.wav").loadFileAsData (hraw);
+                const std::string hbytes ((const char*) hraw.getData(), hraw.getSize());
+                check (hr1.humHz == 60.0 && hr1.humNotches >= 3 && hbytes.find ("cond=hum60Hz/") != std::string::npos,
+                       "the exporter reports the hum it removed and writes it into the comment");
+            }
 
             const auto again = exportCycles (data, items2, base, 24, 2.0f, o);
             check (again.written == 0 && again.skippedExisting.size() == 2, "existing files are never overwritten");
