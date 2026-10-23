@@ -51,3 +51,9 @@
 - 候補提案: `Suggester` (z-score kNN, 確信度は較正済み)。エディタで未タイプのサイクルに候補を表示 (一覧の「候補」列、`A` で採用)。確信度 0.70 以上は「全て適用」で自動タイプ (未確認扱い, 1 回の Undo で戻せる)
 - Inbox: 取り込み時に Suggester のスナップショットで自動タイプ付け。キューに 確信度 / 自動 / 要確認 を保存し、「確認が必要なものを確信度の低い順」に並べる (`InboxQueue::reviewOrder`)。フォルダ名のタイプ指定は人の判断として優先
 - 検証: `--selftest-learn` (26 項目), `--selftest-inbox` (26 項目), `--report-learn` (`WT_APPDATA` 必須)
+
+## 整音チェーン (Phase 7, `Core/Conditioning`)
+- 2 段構成。**A 段 (録音全体、`conditionFile`)**: DC 除去 → ローカット (Butterworth 2/4 次、単一パス = 遅延なし・長さ不変、先頭値でウォームアップしてクリック防止)。**B 段 (切り出し後のサイクルごと、`conditionCycle`)**: 正規化 (Peak dBFS / LUFS BS.1770 ゲート付き)。マイクロフェードは `exportCycles` の `fadeMs` (B 段の先頭)。ハム除去・パン補正 (L/R レベル差) は S2/S4 で追加予定
+- 既定は全部オフ (`ConditionOptions{}` はビット単位で無変更、書き出しは従来と同一)。正規化は**リミッターを使わず**、天井 (`ceilingDb` 既定 -1) を超えないようゲインを下げる。`maxGainDb` (30) 以上は持ち上げない。-120dBFS 未満は無音扱い
+- 16bit 書き出しの TPDF ディザは、整音が有効な時だけ。適用内容は WAV の INFO コメントに `cond=dc,lc30Hz/2,norm=-1.0dBFS,gain=+3.2dB` の形で記録。元の `AudioData` は変更しない
+- 検証: `--selftest-condition` (30 項目: EBU Tech 3341 基準の -23 LUFS、フィルタ減衰量、天井/最大ゲイン、書き出し統合)。**注意**: `--selftest-learn` は前回のテストが残した状態に依存し、同じ `WT_APPDATA` で 2 回続けると失敗する。毎回新しいフォルダで実行すること

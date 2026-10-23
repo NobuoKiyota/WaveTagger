@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioData.h"
+#include "Conditioning.h"
 
 namespace wt
 {
@@ -16,9 +17,14 @@ struct ExportResult
 {
     int written = 0;
     juce::StringArray skippedExisting, errors;
+
+    // Normalisation: the gains that were applied and how many were stopped by the ceiling / max gain
+    double minGainDb = 0.0, maxGainDb = 0.0;
+    int gainLimited = 0;
 };
 
-/** Writes each region as a 24-bit WAV (source rate / channels) with a short fade at both edges. Never overwrites. */
+/** Writes each region as a 24-bit WAV (source rate / channels) with a short fade at both edges. Never overwrites.
+    `conditioning` is applied to the copy that is written; the source audio is never touched. */
 ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>& items, const juce::File& root,
-                           int bitsPerSample = 24, float fadeMs = 2.0f);
+                           int bitsPerSample = 24, float fadeMs = 2.0f, const ConditionOptions& conditioning = {});
 } // namespace wt

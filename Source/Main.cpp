@@ -5,6 +5,8 @@
 #include "Core/LabelStore.h"
 #include "Core/Suggester.h"
 #include "Core/Clustering.h"
+#include "Core/Conditioning.h"
+#include "Core/Exporter.h"
 #include "Core/FeatureStore.h"
 #include "Core/HardLinks.h"
 #include "Core/InboxQueue.h"
@@ -70,7 +72,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -80,6 +82,7 @@ public:
                                         : args[0] == "--selftest-organize" ? selfTestOrganize()
                                         : args[0] == "--selftest-checks" ? selfTestChecks()
                                         : args[0] == "--selftest-learn" ? selfTestLearn()
+                                        : args[0] == "--selftest-condition" ? selfTestCondition()
                                         : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
@@ -1774,6 +1777,254 @@ private:
             MainComponent again;
             check ((int) again.testLabelStore().size() == learnedTotal && learnedTotal > 0, "the next start (or another PC) has every example already");
         }
+        return ok;
+    }
+
+    bool selfTestCondition()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        constexpr double pi = juce::MathConstants<double>::pi;
+        const auto db = [] (double x) { return 20.0 * std::log10 (juce::jmax (x, 1.0e-12)); };
+        const auto sine = [&] (int channels, double sr, double seconds, double freq, double amp, double dc = 0.0) {
+            juce::AudioBuffer<float> b (channels, (int) (sr * seconds));
+            for (int ch = 0; ch < channels; ++ch)
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                    b.setSample (ch, i, (float) (amp * std::sin (2.0 * pi * freq * i / sr) + dc * (ch == 0 ? 1.0 : -0.5)));
+            return b;
+        };
+        const auto rms = [] (const juce::AudioBuffer<float>& b, int from, int to) {
+            double s = 0.0;
+            for (int i = from; i < to; ++i)
+                s += (double) b.getSample (0, i) * b.getSample (0, i);
+            return std::sqrt (s / (to - from));
+        };
+        const auto mean = [] (const juce::AudioBuffer<float>& b, int ch) {
+            double s = 0.0;
+            for (int i = 0; i < b.getNumSamples(); ++i)
+                s += b.getSample (ch, i);
+            return s / b.getNumSamples();
+        };
+        const auto identical = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b) {
+            if (a.getNumChannels() != b.getNumChannels() || a.getNumSamples() != b.getNumSamples())
+                return false;
+            for (int ch = 0; ch < a.getNumChannels(); ++ch)
+                if (std::memcmp (a.getReadPointer (ch), b.getReadPointer (ch), sizeof (float) * (size_t) a.getNumSamples()) != 0)
+                    return false;
+            return true;
+        };
+
+        ConditionReport rep;
+
+        // ---- defaults are inert
+        {
+            const ConditionOptions off;
+            auto b = sine (2, 48000.0, 1.0, 440.0, 0.3, 0.05);
+            const auto before = b;
+            conditionFile (b, 48000.0, off, rep);
+            conditionCycle (b, 48000.0, off, rep);
+            check (! off.active() && ! off.needsFile() && identical (b, before), "default options change nothing (bit-exact)");
+        }
+
+        // ---- DC removal
+        {
+            ConditionOptions o;
+            o.dcRemove = true;
+            auto b = sine (2, 48000.0, 2.0, 1000.0, 0.5, 0.1);
+            const auto len = b.getNumSamples();
+            conditionFile (b, 48000.0, o, rep);
+            check (std::abs (mean (b, 0)) < 1.0e-5 && std::abs (mean (b, 1)) < 1.0e-5, "DC offset is removed from each channel separately");
+            check (std::abs (rep.dcOffset - 0.1) < 1.0e-4, "the report carries the largest offset that was removed");
+            check (std::abs (db (rms (b, 0, len)) - db (0.5 / std::sqrt (2.0))) < 0.01 && b.getNumSamples() == len, "the tone is untouched and the length is the same");
+        }
+
+        // ---- low cut
+        {
+            const auto attenuation = [&] (double freq, float cut, int order) {
+                ConditionOptions o;
+                o.lowCutHz = cut;
+                o.lowCutOrder = order;
+                auto b = sine (1, 48000.0, 4.0, freq, 0.5);
+                conditionFile (b, 48000.0, o, rep);
+                return db (rms (b, 48000 * 2, 48000 * 4)) - db (0.5 / std::sqrt (2.0));
+            };
+            check (std::abs (attenuation (40.0, 40.0f, 2) - (-3.01)) < 0.2, "2nd order: -3 dB at the cut-off");
+            check (std::abs (attenuation (20.0, 40.0f, 2) - (-12.3)) < 0.6, "2nd order: -12 dB an octave below (12 dB/oct)");
+            check (std::abs (attenuation (20.0, 40.0f, 4) - (-24.1)) < 1.0, "4th order: -24 dB an octave below (24 dB/oct)");
+            check (std::abs (attenuation (2000.0, 40.0f, 4)) < 0.01, "the pass band is flat");
+
+            ConditionOptions o;
+            o.lowCutHz = 20.0f;
+            juce::AudioBuffer<float> step (1, 48000);
+            for (int i = 0; i < step.getNumSamples(); ++i)
+                step.setSample (0, i, 0.3f);
+            conditionFile (step, 48000.0, o, rep);
+            check (step.getMagnitude (0, 0, 48000) < 1.0e-5f, "a recording that starts away from zero does not click");
+        }
+
+        // ---- Peak / ceiling / max gain
+        {
+            ConditionOptions o;
+            o.normalize = NormalizeMode::peak;
+            o.targetDb = -1.0;
+
+            juce::AudioBuffer<float> b (2, 48000);
+            juce::Random rnd (7);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                    b.setSample (ch, i, (rnd.nextFloat() - 0.5f) * 0.4f);
+            conditionCycle (b, 48000.0, o, rep);
+            check (std::abs (db (samplePeak (b)) - (-1.0)) < 0.001 && ! rep.gainLimited, "Peak normalisation lands on the target");
+
+            o.targetDb = 0.0;
+            auto c = sine (1, 48000.0, 0.5, 1000.0, 0.1);
+            conditionCycle (c, 48000.0, o, rep);
+            check (std::abs (db (samplePeak (c)) - (-1.0)) < 0.001 && rep.gainLimited, "a target above the ceiling stops at the ceiling (and says so)");
+
+            o.targetDb = -1.0;
+            auto quiet = sine (1, 48000.0, 0.5, 1000.0, 1.0e-4);
+            conditionCycle (quiet, 48000.0, o, rep);
+            check (std::abs (rep.gainDb - 30.0) < 1.0e-9 && rep.gainLimited, "a near-silent cycle is not boosted beyond the maximum gain");
+
+            juce::AudioBuffer<float> silent (2, 4800);
+            silent.clear();
+            conditionCycle (silent, 48000.0, o, rep);
+            check (samplePeak (silent) == 0.0f && rep.gainDb == 0.0, "digital silence is left alone");
+
+            o.targetDb = -20.0;
+            auto loud = sine (1, 48000.0, 0.5, 1000.0, 0.9);
+            conditionCycle (loud, 48000.0, o, rep);
+            check (std::abs (db (samplePeak (loud)) - (-20.0)) < 0.001 && rep.gainDb < 0.0, "loud cycles are brought down as well");
+        }
+
+        // ---- LUFS (EBU Tech 3341: a 1 kHz sine of -23 dBFS peak in both channels reads -23.0 LUFS)
+        {
+            const auto stereo48 = sine (2, 48000.0, 5.0, 1000.0, std::pow (10.0, -23.0 / 20.0));
+            const auto stereo44 = sine (2, 44100.0, 5.0, 1000.0, std::pow (10.0, -23.0 / 20.0));
+            const auto mono = sine (1, 48000.0, 5.0, 1000.0, std::pow (10.0, -23.0 / 20.0));
+            check (std::abs (measureLoudness (stereo48, 48000.0) - (-23.0)) < 0.1, "reference sine reads -23 LUFS at 48 kHz");
+            check (std::abs (measureLoudness (stereo44, 44100.0) - (-23.0)) < 0.1, "... and at 44.1 kHz");
+            check (std::abs (measureLoudness (mono, 48000.0) - (-26.0)) < 0.1, "a single channel reads 3 dB lower");
+
+            // 3 s of sound, then 10 s of silence: ungated this would read about -26.4; the blocks that straddle the edges
+            // still count, so the gated figure sits a fraction of a dB under the sound itself
+            auto gated = sine (2, 48000.0, 13.0, 1000.0, std::pow (10.0, -20.0 / 20.0));
+            for (int ch = 0; ch < 2; ++ch)
+                gated.clear (ch, 3 * 48000, 10 * 48000);
+            const auto gatedLufs = measureLoudness (gated, 48000.0);
+            check (gatedLufs > -20.8 && gatedLufs < -19.9, "silent stretches are gated out of the measurement");
+
+            const auto shortOne = sine (2, 48000.0, 0.2, 1000.0, std::pow (10.0, -23.0 / 20.0));
+            check (std::abs (measureLoudness (shortOne, 48000.0) - (-23.0)) < 0.2, "a sound shorter than one block is measured ungated");
+
+            juce::AudioBuffer<float> zero (2, 48000);
+            zero.clear();
+            check (measureLoudness (zero, 48000.0) <= -240.0, "silence reads as silence");
+
+            ConditionOptions o;
+            o.normalize = NormalizeMode::lufs;
+            o.targetDb = -16.0;
+            auto b = sine (2, 48000.0, 5.0, 1000.0, std::pow (10.0, -33.0 / 20.0));
+            conditionCycle (b, 48000.0, o, rep);
+            check (std::abs (measureLoudness (b, 48000.0) - (-16.0)) < 0.05 && std::abs (rep.gainDb - 17.0) < 0.1, "LUFS normalisation lands on the target");
+
+            o.targetDb = 0.0;
+            auto c = sine (2, 48000.0, 5.0, 1000.0, std::pow (10.0, -23.0 / 20.0));
+            conditionCycle (c, 48000.0, o, rep);
+            check (std::abs (db (samplePeak (c)) - (-1.0)) < 0.001 && rep.gainLimited, "a loudness target that would clip stops at the peak ceiling");
+        }
+
+        // ---- dither
+        {
+            juce::AudioBuffer<float> z (1, 200000);
+            z.clear();
+            addTpdfDither (z, 16, 5);
+            const auto lsb = 1.0 / 32768.0;
+            check (std::abs (mean (z, 0)) < 0.02 * lsb && std::abs (rms (z, 0, z.getNumSamples()) / lsb - 0.4082) < 0.01
+                       && z.getMagnitude (0, 0, z.getNumSamples()) < (float) lsb,
+                   "TPDF dither: zero mean, 0.41 LSB rms, never more than 1 LSB");
+        }
+
+        // ---- exporter
+        {
+            const auto base = testRoot.getChildFile ("condition_test");
+            base.deleteRecursively();
+
+            AudioData data;
+            data.sampleRate = 48000.0;
+            data.bitsPerSample = 24;
+            data.buffer.setSize (2, 48000 * 4);
+            juce::Random rnd (11);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < data.buffer.getNumSamples(); ++i)
+                    data.buffer.setSample (ch, i, (rnd.nextFloat() - 0.5f) * 0.1f + 0.05f);
+            const auto original = data.buffer;
+
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            const auto load = [&] (const juce::File& f, int& bits) {
+                std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (f));
+                juce::AudioBuffer<float> b;
+                if (r != nullptr)
+                {
+                    bits = (int) r->bitsPerSample;
+                    b.setSize ((int) r->numChannels, (int) r->lengthInSamples);
+                    r->read (&b, 0, (int) r->lengthInSamples, 0, true, true);
+                }
+                return b;
+            };
+
+            const std::vector<ExportItem> items { { 12000, 60000, "A", "plain", "" }, { 100000, 150000, "A", "plain2", "" } };
+
+            // default options: the same as before this stage existed (samples copied, 2 ms edge fades)
+            const auto plain = exportCycles (data, items, base);
+            int bits = 0;
+            const auto p1 = load (base.getChildFile ("A/plain.wav"), bits);
+            double worst = 0.0;
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 200; i < p1.getNumSamples() - 200; ++i)
+                    worst = juce::jmax (worst, (double) std::abs (p1.getSample (ch, i) - original.getSample (ch, 12000 + i)));
+            check (plain.written == 2 && p1.getNumSamples() == 48000 && worst < 1.0e-6 && plain.gainLimited == 0, "default export keeps the samples as they are");
+
+            ConditionOptions o;
+            o.dcRemove = true;
+            o.lowCutHz = 30.0f;
+            o.normalize = NormalizeMode::peak;
+            o.targetDb = -1.0;
+            const std::vector<ExportItem> items2 { { 12000, 60000, "B", "cond1", "" }, { 100000, 150000, "B", "cond2", "" } };
+            const auto res = exportCycles (data, items2, base, 24, 2.0f, o);
+            const auto c1 = load (base.getChildFile ("B/cond1.wav"), bits);
+            const auto c2 = load (base.getChildFile ("B/cond2.wav"), bits);
+            check (res.written == 2 && std::abs (db (samplePeak (c1)) - (-1.0)) < 0.01 && std::abs (db (samplePeak (c2)) - (-1.0)) < 0.01,
+                   "each exported file is normalised on its own");
+            check (std::abs (mean (c1, 0)) < 0.002 && c1.getNumSamples() == 48000, "DC and low frequencies are gone and the length is as cut");
+            check (identical (data.buffer, original), "the loaded recording is never modified");
+
+            juce::MemoryBlock raw;
+            base.getChildFile ("B/cond1.wav").loadFileAsData (raw);
+            const std::string bytes ((const char*) raw.getData(), raw.getSize());
+            check (bytes.find ("cond=dc,lc30Hz/2,norm=-1.0dBFS,gain=") != std::string::npos, "the applied chain is recorded in the WAV comment");
+
+            const auto again = exportCycles (data, items2, base, 24, 2.0f, o);
+            check (again.written == 0 && again.skippedExisting.size() == 2, "existing files are never overwritten");
+
+            const std::vector<ExportItem> items3 { { 12000, 60000, "C", "sixteen", "" } };
+            const auto r16 = exportCycles (data, items3, base, 16, 2.0f, o);
+            const auto s16 = load (base.getChildFile ("C/sixteen.wav"), bits);
+            check (r16.written == 1 && bits == 16 && std::abs (db (samplePeak (s16)) - (-1.0)) < 0.01, "16-bit export (with dither) works and still lands on the target");
+        }
+
         return ok;
     }
 
