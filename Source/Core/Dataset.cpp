@@ -1,5 +1,7 @@
 #include "Dataset.h"
 #include "Attributes.h"
+#include "EmbeddedState.h"
+#include "WavChunks.h"
 
 namespace wt
 {
@@ -134,11 +136,8 @@ struct Line
     juce::var value;
     juce::String raw;
 };
-} // namespace
-
-juce::String datasetClipId (const juce::String& sourceFile, juce::int64 sourceSize, juce::int64 start, juce::int64 end)
+juce::String hashedId (const juce::String& key)
 {
-    const auto key = sourceFile.toLowerCase() + "|" + juce::String (sourceSize) + "|" + juce::String (start) + "|" + juce::String (end);
     // two independent 64-bit FNV-1a runs: 128 bits, the same on every PC (String::hashCode64 is not specified to be)
     const auto fnv = [&key] (juce::uint64 hash) {
         for (const auto* p = key.toUTF8().getAddress(); *p != 0; ++p)
@@ -150,6 +149,17 @@ juce::String datasetClipId (const juce::String& sourceFile, juce::int64 sourceSi
     };
     return juce::String::toHexString ((juce::int64) fnv (0xcbf29ce484222325ULL)).paddedLeft ('0', 16)
            + juce::String::toHexString ((juce::int64) fnv (0x84222325cbf29ce4ULL)).paddedLeft ('0', 16);
+}
+} // namespace
+
+juce::String datasetClipId (const juce::String& sourceFile, juce::int64 sourceFrames, juce::int64 start, juce::int64 end)
+{
+    return hashedId (sourceFile.toLowerCase() + "|" + juce::String (sourceFrames) + "|" + juce::String (start) + "|" + juce::String (end));
+}
+
+juce::String datasetLegacyClipId (const juce::String& sourceFile, juce::int64 sourceSize, juce::int64 start, juce::int64 end)
+{
+    return hashedId (sourceFile.toLowerCase() + "|" + juce::String (sourceSize) + "|" + juce::String (start) + "|" + juce::String (end));
 }
 
 juce::String datasetCaptionEn (const DatasetClip& c, const Dictionary* dictionary)
@@ -171,7 +181,7 @@ juce::String datasetCaptionJa (const DatasetClip& c, const Dictionary* dictionar
     return join (parts, juce::String::fromUTF8 ("、"));
 }
 
-DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetClip>& clips, const juce::File& folder,
+DatasetResult addToDataset (const DatasetAudioProvider& audioProvider, const std::vector<DatasetClip>& clips, const juce::File& folder,
                             const ConditionOptions& conditioning, const juce::String& appVersion, const Dictionary* dictionary)
 {
     DatasetResult result;
@@ -219,20 +229,29 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
         DatasetClip clip;
         juce::String id, fileName;
     };
-    std::vector<Pending> pending;
+    std::vector<Pending> candidates;
 
     for (const auto& clip : clips)
     {
-        if (clip.type.isEmpty() || clip.end <= clip.start || clip.end > audio.getNumSamples())
+        if (clip.type.isEmpty() || clip.end <= clip.start)
         {
             result.errors.add (clip.name + ": not a typed clip inside the recording");
             continue;
         }
 
-        const auto id = datasetClipId (clip.sourceFile, clip.sourceSize, clip.start, clip.end);
-        if (const auto it = byId.find (id); it != byId.end())
+        const auto id = datasetClipId (clip.sourceFile, clip.sourceFrames, clip.start, clip.end);
+
+        // a line made before ids stopped depending on the file size (which changes whenever markers are written)
+        auto found = byId.find (id);
+        const auto legacyId = clip.sourceSize > 0 ? datasetLegacyClipId (clip.sourceFile, clip.sourceSize, clip.start, clip.end) : juce::String();
+        const auto upgrading = found == byId.end() && legacyId.isNotEmpty() && byId.find (legacyId) != byId.end();
+        if (upgrading)
+            found = byId.find (legacyId);
+
+        if (found != byId.end())
         {
-            auto& line = lines[it->second];
+            const auto index = found->second;
+            auto& line = lines[index];
             const auto before = lineOf (line.value);
             const auto wasNg = (bool) line.value.getProperty ("ng", false);
 
@@ -242,7 +261,7 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
             const auto labelChanged = lineOf (line.value) != before;
             if (clip.ng != wasNg && clip.ng)
                 ++result.ngMarked;
-            else if (labelChanged)
+            else if (labelChanged || upgrading)
                 ++result.updated;
             else
             {
@@ -250,6 +269,13 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
                 continue;
             }
 
+            if (upgrading)
+            {
+                byId.erase (legacyId);
+                byId[id] = index;
+                line.id = id;
+                o->setProperty ("id", id);
+            }
             o->setProperty ("updatedAt", now);
             changed = true;
             continue;
@@ -261,63 +287,87 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
             continue;
         }
 
-        // a name that is taken (by another recording's clip, or by a file that is there) gets the id's start
-        auto fileName = clip.name;
-        if (usedNames.contains (fileName.toLowerCase()) || audioDir.getChildFile (fileName + ".wav").exists())
-            fileName += "_" + id.substring (0, 8);
-        usedNames.add (fileName.toLowerCase());
-        pending.push_back ({ clip, id, fileName });
+        candidates.push_back ({ clip, id, {} });
     }
 
-    if (! pending.empty())
+    // the recording is read only now, and only because something has to be cut from it
+    std::vector<Pending> pending;
+    if (! candidates.empty())
     {
-        std::vector<ExportItem> items;
-        for (const auto& p : pending)
-            items.push_back ({ p.clip.start, p.clip.end, "audio", p.fileName, "WaveTagger dataset; id=" + p.id });
-
-        const auto written = exportCycles (audio, items, folder, 24, 2.0f, conditioning);
-        for (const auto& e : written.errors)
-            result.errors.add ("not written: " + e);
-
-        for (const auto& p : pending)
+        const auto audioPtr = audioProvider ? audioProvider() : AudioDataPtr();
+        const auto* audio = audioPtr.get();
+        for (auto& p : candidates)
         {
-            const auto file = audioDir.getChildFile (p.fileName + ".wav");
-            if (! file.existsAsFile())
+            if (audio == nullptr)
+            {
+                result.errors.add (p.clip.name + ": the recording could not be read");
                 continue;
+            }
+            if (p.clip.end > audio->getNumSamples())
+            {
+                result.errors.add (p.clip.name + ": not a typed clip inside the recording");
+                continue;
+            }
 
-            juce::String chain;
-            for (const auto& [f, c] : written.writtenFiles)
-                if (f == file)
-                    chain = c;
+            // a name that is taken (by another recording's clip, or by a file that is there) gets the id's start
+            auto fileName = p.clip.name;
+            if (usedNames.contains (fileName.toLowerCase()) || audioDir.getChildFile (fileName + ".wav").exists())
+                fileName += "_" + p.id.substring (0, 8);
+            usedNames.add (fileName.toLowerCase());
+            p.fileName = fileName;
+            pending.push_back (p);
+        }
 
-            auto* o = new juce::DynamicObject();
-            o->setProperty ("schema", 1);
-            o->setProperty ("id", p.id);
-            o->setProperty ("audio", "audio/" + p.fileName + ".wav");
+        if (! pending.empty())
+        {
+            std::vector<ExportItem> items;
+            for (const auto& p : pending)
+                items.push_back ({ p.clip.start, p.clip.end, "audio", p.fileName, "WaveTagger dataset; id=" + p.id });
 
-            auto* original = new juce::DynamicObject();
-            original->setProperty ("file", p.clip.sourceFile);
-            original->setProperty ("start", p.clip.start);
-            original->setProperty ("end", p.clip.end);
-            o->setProperty ("original", juce::var (original));
+            const auto written = exportCycles (*audio, items, folder, 24, 2.0f, conditioning);
+            for (const auto& e : written.errors)
+                result.errors.add ("not written: " + e);
 
-            o->setProperty ("name", p.clip.name);
-            setLabelFields (*o, p.clip, dictionary, result.untranslated);
-            o->setProperty ("duration", (double) (p.clip.end - p.clip.start) / audio.sampleRate);
-            o->setProperty ("sampleRate", audio.sampleRate);
-            o->setProperty ("channels", audio.getNumChannels());
-            o->setProperty ("bits", 24);
-            o->setProperty ("conditioning", chain);
-            o->setProperty ("exportedAt", now);
-            o->setProperty ("app", "WaveTagger " + appVersion);
+            for (const auto& p : pending)
+            {
+                const auto file = audioDir.getChildFile (p.fileName + ".wav");
+                if (! file.existsAsFile())
+                    continue;
 
-            Line l;
-            l.id = p.id;
-            l.value = juce::var (o);
-            byId[p.id] = lines.size();
-            lines.push_back (std::move (l));
-            ++result.added;
-            changed = true;
+                juce::String chain;
+                for (const auto& [f, c] : written.writtenFiles)
+                    if (f == file)
+                        chain = c;
+
+                auto* o = new juce::DynamicObject();
+                o->setProperty ("schema", 1);
+                o->setProperty ("id", p.id);
+                o->setProperty ("audio", "audio/" + p.fileName + ".wav");
+
+                auto* original = new juce::DynamicObject();
+                original->setProperty ("file", p.clip.sourceFile);
+                original->setProperty ("start", p.clip.start);
+                original->setProperty ("end", p.clip.end);
+                o->setProperty ("original", juce::var (original));
+
+                o->setProperty ("name", p.clip.name);
+                setLabelFields (*o, p.clip, dictionary, result.untranslated);
+                o->setProperty ("duration", (double) (p.clip.end - p.clip.start) / audio->sampleRate);
+                o->setProperty ("sampleRate", audio->sampleRate);
+                o->setProperty ("channels", audio->getNumChannels());
+                o->setProperty ("bits", 24);
+                o->setProperty ("conditioning", chain);
+                o->setProperty ("exportedAt", now);
+                o->setProperty ("app", "WaveTagger " + appVersion);
+
+                Line l;
+                l.id = p.id;
+                l.value = juce::var (o);
+                byId[p.id] = lines.size();
+                lines.push_back (std::move (l));
+                ++result.added;
+                changed = true;
+            }
         }
     }
 
@@ -349,5 +399,150 @@ DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetCli
     }
 
     return result;
+}
+
+DatasetResult addToDataset (const AudioData& audio, const std::vector<DatasetClip>& clips, const juce::File& folder,
+                            const ConditionOptions& conditioning, const juce::String& appVersion, const Dictionary* dictionary)
+{
+    // not owned: the caller's recording outlives the call
+    const AudioDataPtr view (AudioDataPtr(), &audio);
+    return addToDataset ([view] { return view; }, clips, folder, conditioning, appVersion, dictionary);
+}
+
+//==============================================================================
+JapaneseNames JapaneseNames::from (const Catalog& catalog)
+{
+    JapaneseNames names;
+    for (const auto& c : catalog.getCategories())
+    {
+        names.category[c.name.toLowerCase()] = c.jp;
+        for (const auto& t : catalog.getTypes (c.name, false))
+            names.type[c.name.toLowerCase() + "|" + t.name.toLowerCase()] = t.jp;
+    }
+    for (const auto& t : catalog.getTypes (Catalog::commonCategory, false))
+        names.type[juce::String ("*|") + t.name.toLowerCase()] = t.jp;
+    return names;
+}
+
+juce::String JapaneseNames::forCategory (const juce::String& categoryName) const
+{
+    const auto it = category.find (categoryName.toLowerCase());
+    return it == category.end() ? juce::String() : it->second;
+}
+
+juce::String JapaneseNames::forType (const juce::String& categoryName, const juce::String& typeName) const
+{
+    for (const auto& key : { categoryName.toLowerCase() + "|" + typeName.toLowerCase(), juce::String ("*|") + typeName.toLowerCase() })
+        if (const auto it = type.find (key); it != type.end())
+            return it->second;
+    return {};
+}
+
+WavTagResult datasetClipsFromWav (const juce::File& wav, juce::AudioFormatManager& formats, const JapaneseNames& names, WavClips& out)
+{
+    out = {};
+
+    juce::var json;
+    WtagData tags;
+    if (! readWtag (wav, json) || ! parseWtag (json, tags))
+        return WavTagResult::noTags;
+
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (wav));
+    if (reader == nullptr)
+        return WavTagResult::unreadable;
+
+    out.frames = reader->lengthInSamples;
+    const auto size = wav.getSize();
+    const auto categoryJa = names.forCategory (tags.category);
+
+    for (const auto& c : tags.cycles)
+    {
+        if (c.typeName.isEmpty())
+        {
+            ++out.untyped;
+            continue;
+        }
+        if (! c.confirmed)
+        {
+            ++out.unconfirmed; // typed by the Inbox's suggestions and never looked at: not a person's judgement
+            continue;
+        }
+
+        DatasetClip clip;
+        clip.start = c.start;
+        clip.end = c.end;
+        clip.sourceFile = wav.getFileName();
+        clip.sourceFrames = out.frames;
+        clip.sourceSize = size;
+        clip.name = c.name;
+        clip.category = tags.category;
+        clip.categoryJa = categoryJa;
+        clip.type = c.typeName;
+        clip.typeJa = names.forType (tags.category, c.typeName);
+        clip.rating = c.rating;
+        clip.ng = c.ng;
+        clip.attributes = normaliseAttributes (c.attributes);
+        out.clips.push_back (clip);
+    }
+    return WavTagResult::ok;
+}
+
+DatasetBatchResult addRawFolderToDataset (const juce::File& rawDir, const juce::File& folder, juce::AudioFormatManager& formats, const JapaneseNames& names,
+                                          const ConditionOptions& conditioning, const juce::String& appVersion, const Dictionary* dictionary,
+                                          const std::function<bool (int, int, const juce::String&)>& progress)
+{
+    DatasetBatchResult batch;
+
+    auto files = rawDir.findChildFiles (juce::File::findFiles, true, "*.wav");
+    std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b) { return a.getFullPathName().compareIgnoreCase (b.getFullPathName()) < 0; });
+    batch.wavFiles = files.size();
+
+    for (int i = 0; i < files.size(); ++i)
+    {
+        const auto& wav = files.getReference (i);
+        if (progress && ! progress (i, files.size(), wav.getFileName()))
+        {
+            batch.cancelled = true;
+            break;
+        }
+
+        WavClips found;
+        const auto state = datasetClipsFromWav (wav, formats, names, found);
+        if (state == WavTagResult::noTags)
+        {
+            ++batch.noTags;
+            continue;
+        }
+        if (state == WavTagResult::unreadable)
+        {
+            ++batch.unreadable;
+            batch.total.errors.add (wav.getFullPathName() + ": could not be read");
+            continue;
+        }
+
+        batch.unconfirmed += found.unconfirmed;
+        batch.untyped += found.untyped;
+        if (found.clips.empty())
+            continue;
+
+        ++batch.withClips;
+        const auto provider = [&] () -> AudioDataPtr {
+            ++batch.audioRead;
+            juce::String error;
+            return loadAudioFile (formats, wav, error);
+        };
+
+        const auto r = addToDataset (provider, found.clips, folder, conditioning, appVersion, dictionary);
+        batch.total.added += r.added;
+        batch.total.updated += r.updated;
+        batch.total.ngMarked += r.ngMarked;
+        batch.total.unchanged += r.unchanged;
+        batch.total.skippedNg += r.skippedNg;
+        batch.total.errors.addArray (r.errors);
+        batch.total.untranslated.addArray (r.untranslated);
+    }
+
+    batch.total.untranslated.removeDuplicates (true);
+    return batch;
 }
 } // namespace wt

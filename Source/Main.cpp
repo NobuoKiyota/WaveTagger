@@ -2727,7 +2727,7 @@ private:
             c.start = start;
             c.end = end;
             c.sourceFile = file;
-            c.sourceSize = 123456;
+            c.sourceFrames = 123456;
             c.name = name;
             c.category = "TOOLS";
             c.categoryJa = WT_U8 ("工具");
@@ -2895,6 +2895,165 @@ private:
                    "the Japanese names come from the catalogue");
         }
 
+        // ---- the whole Raw folder
+        {
+            const auto raw = base.getChildFile ("raw");
+            const auto sub = raw.getChildFile ("2026/sub");
+            sub.createDirectory();
+
+            const auto writeWav = [&] (const juce::File& f, double seconds) {
+                juce::WavAudioFormat wav;
+                std::unique_ptr<juce::OutputStream> stream (f.createOutputStream());
+                auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions {}.withSampleRate (48000.0).withNumChannels (2).withBitsPerSample (24));
+                juce::AudioBuffer<float> b (2, (int) (48000.0 * seconds));
+                juce::Random r (f.getFileName().hashCode());
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                        b.setSample (ch, i, (r.nextFloat() - 0.5f) * 0.3f);
+                writer->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+                return (juce::int64) b.getNumSamples();
+            };
+
+            // the tags a recording would carry after the editor saved it
+            const auto tag = [&] (const juce::File& f, int rating, bool thirdIsNg, bool withUnconfirmed) {
+                CycleModel m;
+                m.setTypeName (0, "Open");
+                m.setCategory ("TOOLS");
+                m.add (4800, 24000, 0);
+                m.add (28800, 48000, 0);
+                m.add (52800, 72000, withUnconfirmed ? -1 : 0);
+                m.setRating ({ 0 }, rating);
+                m.setAttributes (0, "strength=strong");
+                if (thirdIsNg)
+                    m.setNg ({ 2 }, true);
+                if (withUnconfirmed)
+                {
+                    m.setSuggestion (2, "Open", 0.9f, 0, true); // typed by a suggestion, never looked at
+                    m.add (76800, 96000, -1);                    // and one that has no type at all
+                }
+                return embedMarkers (f, f, buildEmbedRequest (m, 48000.0, "t")).ok;
+            };
+
+            const auto fileA = raw.getChildFile ("2026/A.wav"), fileB = sub.getChildFile ("B.wav"), fileC = raw.getChildFile ("2026/C.wav"), fileD = raw.getChildFile ("2026/D.wav");
+            writeWav (fileA, 4.0);
+            writeWav (fileB, 4.0);
+            writeWav (fileC, 3.0);
+            fileD.replaceWithText ("not a wav");
+            check (tag (fileA, 4, true, false) && tag (fileB, 2, false, true), "(test setup) two recordings are tagged, one has no tags, one is not audio");
+
+            JapaneseNames names;
+            names.category["tools"] = WT_U8 ("工具");
+            names.type["tools|open"] = WT_U8 ("開く");
+
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            const auto folder = base.getChildFile ("batch_set");
+            const auto lines = [&] {
+                juce::StringArray l;
+                l.addLines (folder.getChildFile ("metadata.jsonl").loadFileAsString());
+                l.removeEmptyStrings();
+                return l;
+            };
+            const auto bytesOf = [] (const juce::File& f) {
+                juce::MemoryBlock m;
+                f.loadFileAsData (m);
+                return m;
+            };
+
+            const auto rawBefore = bytesOf (fileA);
+            int calls = 0, seenTotal = 0;
+            auto r = addRawFolderToDataset (raw, folder, formats, names, ConditionOptions {}, "test", nullptr, [&] (int, int total, const juce::String&) {
+                ++calls;
+                seenTotal = total;
+                return true;
+            });
+            check (r.wavFiles == 4 && r.withClips == 2 && r.noTags == 2 && r.audioRead == 2 && calls == 4 && seenTotal == 4 && ! r.cancelled,
+                   "every WAV under the folder is looked at (sub folders too); only the two tagged ones count, and progress is reported");
+            check (r.total.added == 4 && r.total.skippedNg == 1 && r.unconfirmed == 1 && r.untyped == 1 && r.total.errors.isEmpty(),
+                   "confirmed clips are added; a new NG one, a suggestion nobody confirmed and an untyped cycle are not");
+            check (lines().size() == 4 && bytesOf (fileA) == rawBefore, "four lines were written and the Raw file is untouched");
+
+            const auto first = juce::JSON::parse (lines()[0]);
+            check (first.getProperty ("category", {}).toString() == "TOOLS" && first.getProperty ("caption_ja", {}).toString().startsWith (WT_U8 ("開く (工具)"))
+                       && (int) first.getProperty ("rating", 0) == 4 && first.getProperty ("original", {}).getProperty ("file", {}).toString() == "A.wav",
+                   "category, stars and the Japanese names come from the file's tags and the catalogue");
+
+            // the second run reads no audio at all and changes nothing
+            const auto meta = bytesOf (folder.getChildFile ("metadata.jsonl"));
+            r = addRawFolderToDataset (raw, folder, formats, names, ConditionOptions {}, "test", nullptr);
+            check (r.audioRead == 0 && r.total.added == 0 && r.total.updated == 0 && r.total.unchanged == 4 && bytesOf (folder.getChildFile ("metadata.jsonl")) == meta,
+                   "running it again reads no audio and changes nothing");
+
+            // a change of stars is picked up without reading the recording
+            check (tag (fileA, 5, true, false), "(test setup) stars changed in the tags");
+            r = addRawFolderToDataset (raw, folder, formats, names, ConditionOptions {}, "test", nullptr);
+            check (r.audioRead == 0 && r.total.updated == 1 && (int) juce::JSON::parse (lines()[0]).getProperty ("rating", 0) == 5, "a new rating is brought over without reading the audio");
+
+            // adding from the editor and then writing markers must not make the same clips twice
+            const auto fileE = raw.getChildFile ("2026/E.wav");
+            const auto framesE = writeWav (fileE, 3.0);
+            AudioData audioE;
+            {
+                juce::String error;
+                const auto loaded = loadAudioFile (formats, fileE, error);
+                audioE.sampleRate = loaded->sampleRate;
+                audioE.buffer = loaded->buffer;
+                audioE.file = fileE;
+            }
+            DatasetClip editorClip;
+            editorClip.start = 4800;
+            editorClip.end = 24000;
+            editorClip.sourceFile = "E.wav";
+            editorClip.sourceFrames = framesE;
+            editorClip.sourceSize = fileE.getSize();
+            editorClip.name = "Tools_Open09";
+            editorClip.category = "TOOLS";
+            editorClip.type = "Open";
+            const auto linesBefore = lines().size();
+            r.total = addToDataset (audioE, { editorClip }, folder, ConditionOptions {}, "test");
+            check (r.total.added == 1 && lines().size() == linesBefore + 1, "(test setup) a clip is added from the editor");
+
+            const auto sizeBefore = fileE.getSize();
+            CycleModel me;
+            me.setTypeName (0, "Open");
+            me.setCategory ("TOOLS");
+            me.add (4800, 24000, 0);
+            check (embedMarkers (fileE, fileE, buildEmbedRequest (me, 48000.0, "t")).ok && fileE.getSize() != sizeBefore, "(test setup) markers are written, so the file is bigger");
+            r = addRawFolderToDataset (raw, folder, formats, names, ConditionOptions {}, "test", nullptr);
+            check (r.audioRead == 0 && r.total.added == 0 && lines().size() == linesBefore + 1,
+                   "after the markers were written the same clip is recognised (the id does not depend on the file size)");
+
+            // a line made when ids still contained the file size is recognised and brought up to date
+            {
+                const auto old = base.getChildFile ("legacy_set");
+                old.createDirectory();
+                DatasetClip c = editorClip;
+                c.sourceSize = 777777;
+                const auto legacy = datasetLegacyClipId (c.sourceFile, c.sourceSize, c.start, c.end);
+                old.getChildFile ("metadata.jsonl").replaceWithText ("{\"schema\":1,\"id\":\"" + legacy + "\",\"audio\":\"audio/Tools_Open09.wav\",\"rating\":0,\"ng\":false}\n", false, false, "\n");
+
+                int reads = 0;
+                const auto result = addToDataset ([&] () -> AudioDataPtr { ++reads; return {}; }, { c }, old, ConditionOptions {}, "test");
+                juce::StringArray l;
+                l.addLines (old.getChildFile ("metadata.jsonl").loadFileAsString());
+                l.removeEmptyStrings();
+                check (result.added == 0 && result.updated == 1 && reads == 0 && l.size() == 1
+                           && juce::JSON::parse (l[0]).getProperty ("id", {}).toString() == datasetClipId (c.sourceFile, c.sourceFrames, c.start, c.end),
+                       "an older line (id with the file size) is found, its id is brought up to date, and no audio is read");
+            }
+
+            // it can be stopped
+            {
+                const auto stopped = base.getChildFile ("stopped_set");
+                int seen = 0;
+                const auto result = addRawFolderToDataset (raw, stopped, formats, names, ConditionOptions {}, "test", nullptr, [&] (int index, int, const juce::String&) {
+                    seen = index;
+                    return index < 1;
+                });
+                check (result.cancelled && seen == 1 && result.total.added == 2, "cancelling stops after the files done so far (here only the first recording)");
+            }
+        }
+
         return ok;
     }
 
@@ -3017,7 +3176,7 @@ private:
             c.start = 1000;
             c.end = 48000;
             c.sourceFile = "t.wav";
-            c.sourceSize = 99;
+            c.sourceFrames = 99;
             c.name = "Tools_Open01";
 
             const auto folder = base.getChildFile ("set");

@@ -25,6 +25,7 @@ struct WtagData
     int schema = 0;
     juce::int64 savedAt = 0; // ms since epoch; decides whether the WAV or the local project is newer
     double sampleRate = 0.0;
+    juce::String category, prefix; // empty if the file does not say
     std::vector<WtagCycle> cycles;
 };
 

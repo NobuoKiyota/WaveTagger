@@ -240,6 +240,7 @@ MainComponent::~MainComponent()
     organizerWindow = nullptr;
     conditioningWindow = nullptr;
     dictionaryWindow = nullptr;
+    datasetJob = nullptr;
     conditionPreview.onChanged = nullptr;
     loader.removeAllJobs (true, 10000);
     spectrogram.onNewImage = nullptr;
@@ -1197,6 +1198,7 @@ void MainComponent::showExportMenu()
     menu.addSeparator();
     menu.addItem (3, WT_U8 ("データセットの場所を変更...") + (datasetDir.isDirectory() ? "   (" + datasetDir.getFullPathName() + ")" : juce::String()));
     menu.addItem (4, WT_U8 ("翻訳辞書..."));
+    menu.addItem (5, WT_U8 ("Raw フォルダ全体をデータセットに追加..."), datasetJob == nullptr);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&exportButton), [safe] (int r) {
@@ -1210,6 +1212,8 @@ void MainComponent::showExportMenu()
             safe->chooseDatasetFolder ({});
         else if (r == 4)
             safe->showDictionary();
+        else if (r == 5)
+            safe->startRawDatasetExport();
     });
 }
 
@@ -1279,6 +1283,7 @@ std::vector<DatasetClip> MainComponent::collectDatasetClips (int& untyped) const
         clip.end = c.end;
         clip.sourceFile = audio->file.getFileName();
         clip.sourceSize = audio->file.getSize();
+        clip.sourceFrames = audio->getNumSamples();
         clip.name = cycles.nameOf (i);
         clip.category = category;
         clip.categoryJa = categoryJa;
@@ -1313,6 +1318,131 @@ void MainComponent::chooseDatasetFolder (std::function<void()> then)
                               if (then)
                                   then();
                           });
+}
+
+namespace
+{
+/** The Raw folder -> dataset run on a thread of its own, with a progress bar and a cancel button. */
+class DatasetBatchJob : public juce::ThreadWithProgressWindow
+{
+public:
+    DatasetBatchJob (juce::File raw, juce::File dataset, juce::AudioFormatManager& formatManager, JapaneseNames japanese, ConditionOptions options,
+                     std::shared_ptr<Dictionary> words, std::function<void (const DatasetBatchResult&)> whenDone)
+        : juce::ThreadWithProgressWindow (WT_U8 ("データセットに追加しています..."), true, true, 20000, WT_U8 ("中止")),
+          rawDir (std::move (raw)), folder (std::move (dataset)), formats (formatManager), names (std::move (japanese)),
+          conditioning (std::move (options)), dictionary (std::move (words)), done (std::move (whenDone))
+    {
+    }
+
+    void run() override
+    {
+        result = addRawFolderToDataset (rawDir, folder, formats, names, conditioning, JUCE_APPLICATION_VERSION_STRING, dictionary.get(),
+                                        [this] (int index, int total, const juce::String& name) {
+                                            if (threadShouldExit())
+                                                return false;
+                                            setProgress (total > 0 ? (double) index / total : 1.0);
+                                            setStatusMessage (juce::String (index + 1) + " / " + juce::String (total) + "   " + name);
+                                            return true;
+                                        });
+    }
+
+    void threadComplete (bool) override
+    {
+        if (done)
+            done (result);
+    }
+
+private:
+    juce::File rawDir, folder;
+    juce::AudioFormatManager& formats;
+    JapaneseNames names;
+    ConditionOptions conditioning;
+    std::shared_ptr<Dictionary> dictionary;
+    std::function<void (const DatasetBatchResult&)> done;
+    DatasetBatchResult result;
+};
+} // namespace
+
+void MainComponent::startRawDatasetExport()
+{
+    if (datasetJob != nullptr)
+        return;
+
+    if (! rawDir.isDirectory())
+    {
+        chooseRawFolder ([this] { startRawDatasetExport(); });
+        return;
+    }
+    if (! datasetDir.isDirectory())
+    {
+        chooseDatasetFolder ([this] { startRawDatasetExport(); });
+        return;
+    }
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    const auto raw = rawDir, folder = datasetDir;
+    juce::AlertWindow::showOkCancelBox (
+        juce::MessageBoxIconType::QuestionIcon, WT_U8 ("Raw フォルダ全体をデータセットに追加"),
+        WT_U8 ("Raw フォルダの、タグ付け済みのすべての WAV から、データセットに追加します。\n\nRaw: ") + raw.getFullPathName() + WT_U8 ("\nデータセット: ") + folder.getFullPathName()
+            + WT_U8 ("\n\n・Raw のファイルは変更しません\n・すでにデータセットにあるクリップは、★・属性・タイプなどの更新だけを行います\n・Inbox が自動でタイプを付けただけで、まだ確認していないサイクルは入れません"),
+        WT_U8 ("追加する"), WT_U8 ("キャンセル"), this,
+        juce::ModalCallbackFunction::create ([safe, raw, folder] (int result) {
+            if (safe == nullptr || result != 1)
+                return;
+
+            safe->dictionary.reloadIfChanged();
+            safe->datasetJob = std::make_unique<DatasetBatchJob> (
+                raw, folder, safe->formats, JapaneseNames::from (safe->catalog), safe->conditioning.options, std::make_shared<Dictionary> (safe->dictionary),
+                [safe, folder] (const DatasetBatchResult& r) {
+                    juce::MessageManager::callAsync ([safe, r, folder] {
+                        if (safe == nullptr)
+                            return;
+                        safe->datasetJob.reset();
+                        safe->finishRawDatasetExport (r, folder);
+                    });
+                });
+            safe->datasetJob->launchThread();
+        }));
+}
+
+void MainComponent::finishRawDatasetExport (const DatasetBatchResult& r, const juce::File& folder)
+{
+    const auto& t = r.total;
+    // (built in short statements: one expression with this many "+" ran the old MSVC out of heap space)
+    juce::String msg = r.cancelled ? WT_U8 ("途中で中止しました (そこまでの分は追加済みです)\n") : WT_U8 ("データセットに追加しました\n");
+    msg += folder.getFullPathName() + "\n\n";
+
+    msg += WT_U8 ("WAV ") + juce::String (r.wavFiles) + WT_U8 (" 個");
+    msg += WT_U8 (" (タグあり ") + juce::String (r.withClips) + WT_U8 (" / タグなし ") + juce::String (r.noTags);
+    msg += WT_U8 (" / 読めない ") + juce::String (r.unreadable) + ")";
+    msg += WT_U8 ("、音声を読んだのは ") + juce::String (r.audioRead) + WT_U8 (" 個\n");
+
+    msg += WT_U8 ("新規 ") + juce::String (t.added) + WT_U8 (" 件");
+    msg += WT_U8 (" / 更新 ") + juce::String (t.updated) + WT_U8 (" 件");
+    msg += WT_U8 (" / NG にした ") + juce::String (t.ngMarked) + WT_U8 (" 件");
+    msg += WT_U8 (" / 変更なし ") + juce::String (t.unchanged) + WT_U8 (" 件");
+    if (r.unconfirmed > 0)
+        msg += "\n\n" + juce::String (r.unconfirmed) + WT_U8 (" 件は、まだ確認していない自動タイプのため入れていません");
+    if (r.untyped > 0)
+        msg += "\n" + juce::String (r.untyped) + WT_U8 (" 件は未分類のため入れていません");
+    if (t.skippedNg > 0)
+        msg += "\n" + juce::String (t.skippedNg) + WT_U8 (" 件は NG のため入れていません");
+    if (! t.untranslated.isEmpty())
+    {
+        juce::StringArray first;
+        for (int i = 0; i < juce::jmin (8, t.untranslated.size()); ++i)
+            first.add (t.untranslated[i]);
+        msg += "\n\n" + juce::String (t.untranslated.size()) + WT_U8 (" 語は翻訳辞書に訳がありません: ") + first.joinIntoString (", ") + (t.untranslated.size() > 8 ? " ..." : "");
+    }
+    if (! t.errors.isEmpty())
+    {
+        juce::StringArray first;
+        for (int i = 0; i < juce::jmin (5, t.errors.size()); ++i)
+            first.add (t.errors[i]);
+        msg += "\n\n" + juce::String (t.errors.size()) + WT_U8 (" 件でエラー:\n") + first.joinIntoString ("\n");
+    }
+    juce::AlertWindow::showMessageBoxAsync (t.errors.isEmpty() ? juce::MessageBoxIconType::InfoIcon : juce::MessageBoxIconType::WarningIcon,
+                                            WT_U8 ("データセット"), msg);
 }
 
 void MainComponent::startDatasetExport()

@@ -59,6 +59,8 @@ bool parseWtag (const juce::var& json, WtagData& out)
     out.schema = (int) json.getProperty ("schema", 0);
     out.savedAt = (juce::int64) json.getProperty ("savedAt", 0);
     out.sampleRate = (double) json.getProperty ("sampleRate", 0.0);
+    out.category = json.getProperty ("category", "").toString();
+    out.prefix = json.getProperty ("prefix", "").toString();
 
     const auto* arr = json.getProperty ("cycles", {}).getArray();
     if (out.schema < 1 || arr == nullptr)

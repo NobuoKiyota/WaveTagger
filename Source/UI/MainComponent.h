@@ -114,6 +114,8 @@ private:
     /** The typed cycles as dataset clips (NG ones included: the dataset flags them). `untyped` counts the ones left out. */
     std::vector<DatasetClip> collectDatasetClips (int& untyped) const;
     void startDatasetExport();
+    void startRawDatasetExport();
+    void finishRawDatasetExport (const DatasetBatchResult& result, const juce::File& folder);
     void chooseDatasetFolder (std::function<void()> then);
     void showExportMenu();
     void showDictionary();
@@ -199,6 +201,7 @@ private:
     AudioDataPtr audio;
     Dictionary dictionary;
     std::unique_ptr<DictionaryWindow> dictionaryWindow;
+    std::unique_ptr<juce::ThreadWithProgressWindow> datasetJob; // the Raw folder -> dataset run, while there is one
     ConditionSettings conditioning;
     ConditioningPreview conditionPreview;
     std::unique_ptr<ConditioningWindow> conditioningWindow;
