@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a">
+<title>WaveTagger Rec</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.png">
+<style>
+  :root { --bg:#14161a; --panel:#1d2026; --line:#2c313a; --text:#e8eaed; --dim:#8b929c; --rec:#e5484d; --ok:#46c28a; --warn:#e0b84f; --accent:#4c8dff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, "Noto Sans JP", sans-serif; }
+  body { min-height:100dvh; padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); max-width:520px; margin:0 auto; }
+  h1 { font-size:18px; margin:0 0 12px; display:flex; justify-content:space-between; align-items:center; }
+  button { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+  button:active { filter:brightness(1.3); }
+  .gear { padding:6px 10px; }
+  .meter { height:14px; background:var(--panel); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .meter > div { height:100%; width:0; background:var(--ok); transition:width .05s linear; }
+  .meter.hot > div { background:var(--rec); }
+  .time { font-size:44px; font-variant-numeric:tabular-nums; text-align:center; margin:18px 0 6px; }
+  .info { text-align:center; color:var(--dim); min-height:1.5em; }
+  .recwrap { display:flex; justify-content:center; margin:22px 0; }
+  #rec { width:132px; height:132px; border-radius:50%; background:var(--rec); border:6px solid #fff3; font-size:18px; font-weight:700; color:#fff; }
+  #rec.on { border-radius:26px; animation:pulse 1.2s infinite; }
+  @keyframes pulse { 50% { filter:brightness(1.25); } }
+  .box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; margin:14px 0; }
+  .box h2 { font-size:14px; color:var(--dim); margin:0 0 8px; font-weight:600; }
+  label { display:block; color:var(--dim); font-size:13px; margin:10px 0 4px; }
+  input[type=text] { width:100%; font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:9px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { display:flex; justify-content:space-between; gap:8px; padding:8px 0; border-top:1px solid var(--line); font-size:14px; }
+  li:first-child { border-top:0; }
+  .st-done { color:var(--ok); } .st-wait { color:var(--warn); } .st-fail { color:var(--rec); }
+  .hidden { display:none; }
+  .small { font-size:13px; color:var(--dim); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<h1><span>WaveTagger Rec</span><button class="gear" id="gear" aria-label="設定">設定</button></h1>
+
+<div class="meter" id="meter"><div></div></div>
+<div class="time" id="time">00:00</div>
+<div class="info" id="info">待機中</div>
+<div class="recwrap"><button id="rec">録音</button></div>
+
+<div class="box hidden" id="settings">
+  <h2>設定</h2>
+  <label for="clientId">Google OAuth クライアント ID</label>
+  <input type="text" id="clientId" autocomplete="off" placeholder="xxxx.apps.googleusercontent.com">
+  <label for="folder">保存先の Drive フォルダ (URL または ID)</label>
+  <input type="text" id="folder" autocomplete="off" placeholder="https://drive.google.com/drive/folders/...">
+  <div class="row" style="margin-top:12px">
+    <button id="save">保存</button>
+    <button id="connect">Google に接続</button>
+  </div>
+  <p class="small" id="auth">未接続</p>
+  <p class="small">録音は 48 kHz / 24 bit の WAV。保存先はパソコンの Inbox が監視しているフォルダにしてください。</p>
+</div>
+
+<div class="box">
+  <h2>最近の録音</h2>
+  <ul id="list"><li class="small">まだありません</li></ul>
+  <div class="row" style="margin-top:8px"><button id="retry" class="hidden">未送信をアップロード</button></div>
+</div>
+
+<script src="wav.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

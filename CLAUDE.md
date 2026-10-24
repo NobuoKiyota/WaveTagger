@@ -101,3 +101,8 @@
 - マトリクスの Type は列順に採用 (空欄・重複は無視)。その後に Types シートの Category 別の行が続く。日本語は Types シートから引く (その Category の行 → 共通 `*` や他の Category の行の順)
 - マトリクスにあって Types シートに無い Type は、起動/再読込時に Types シートへ 1 行追加される (日本語は空欄で、記入待ち)
 - 検証: `--selftest-matrix` (10 項目)
+
+## スマホ録音 (ブラウザ版 WaveTagger Rec, `docs/`)
+- GitHub Pages (`/docs`) で公開する PWA。スマホのブラウザで 48kHz/24bit WAV を録音し、停止すると Google Drive の指定フォルダ (Inbox が監視しているもの) へ自動アップロード。設定手順は `docs/SETUP.md`
+- `wav.js` (24bit WAV 書き出し) / `worklet.js` (AudioWorklet で録音) / `app.js` (録音・IndexedDB の送信待ち・Google サインイン (GIS トークン)・Drive 再開可能アップロード)。クライアント ID と保存先フォルダは端末の localStorage (リポジトリには秘密を置かない)
+- 検証: `node Tools/test_wav.js` (WAV の独立確認)。ブラウザでの録音〜アップロードの流れは、偽の音源と偽の Drive で確認済み。実機のマイク・実 Drive・画面オフ時の挙動は未確認
