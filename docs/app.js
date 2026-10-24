@@ -153,7 +153,7 @@
 
   // ---------------------------------------------------------------- recording
   var ctx = null, stream = null, node = null, source = null, chunks = [], channels = 1, rate = TARGET_RATE;
-  var recording = false, startedAt = 0, timer = null, wake = null, level = 0;
+  var recording = false, startedAt = 0, timer = null, wake = null, level = 0, peakPos = 0, peakAt = 0;
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function stamp(d) {
@@ -227,10 +227,15 @@
   function tick() {
     var sec = Math.floor((Date.now() - startedAt) / 1000);
     $('time').textContent = pad(Math.floor(sec / 60)) + ':' + pad(sec % 60);
-    var m = document.querySelector('#meter > div');
-    m.style.width = Math.min(100, Math.round(level * 100)) + '%';
+    var db = level > 0 ? 20 * Math.log10(level) : -120;
+    var pos = Math.max(0, Math.min(1, (db + 60) / 60));
+    $('bar').style.width = (pos * 100) + '%';
+    $('bar').style.setProperty('--full', (100 / Math.max(pos, 0.01)) + '%');
+    if (pos >= peakPos) { peakPos = pos; peakAt = Date.now(); }
+    else if (Date.now() - peakAt > 1500) peakPos = Math.max(pos, peakPos - 0.02);
+    $('peak').style.left = 'calc(' + (peakPos * 100) + '% - 3px)';
     $('meter').classList.toggle('hot', level > 0.97);
-    level *= 0.7;
+    level *= 0.8;
   }
 
   // ---------------------------------------------------------------- UI
@@ -285,5 +290,6 @@
   else $('settings').classList.add('hidden');
   showAuth();
   renderList();
+  $('bar').style.width = '0%';
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
 })();
