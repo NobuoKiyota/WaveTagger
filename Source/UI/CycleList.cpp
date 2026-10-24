@@ -280,7 +280,7 @@ juce::Component* CycleList::refreshComponentForCell (int row, int column, bool, 
     cell->addItem (WT_U8 ("— (未分類)"), 1);
     for (int i = 0; i < CycleModel::numSlots; ++i)
         if (model.isTypeUsable (i))
-            cell->addItem (juce::String (i + 1) + "  " + model.getType (i).name, i + 2);
+            cell->addItem (model.describeType (i), i + 2);
 
     const auto type = model[row].type;
     cell->setSelectedId (type + 2, juce::dontSendNotification);

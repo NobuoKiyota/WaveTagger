@@ -377,7 +377,7 @@ void WaveView::showCycleMenu (int cycleIndex)
     menu.addItem (99, WT_U8 ("— (未分類)"), true, (*cycles)[cycleIndex].type < 0);
     for (int i = 0; i < CycleModel::numSlots; ++i)
         if (cycles->isTypeUsable (i))
-            menu.addItem (100 + i, juce::String (i + 1) + "  " + cycles->getType (i).name, true, (*cycles)[cycleIndex].type == i);
+            menu.addItem (100 + i, cycles->describeType (i), true, (*cycles)[cycleIndex].type == i);
     menu.addSeparator();
     menu.addItem (1, WT_U8 ("削除"));
 

@@ -60,6 +60,8 @@ public:
     const std::vector<CategoryInfo>& getCategories() const { return categories; }
     /** Types registered for this category (then the common ones if includeCommon). */
     std::vector<TypeInfo> getTypes (const juce::String& category, bool includeCommon = true) const;
+    /** The Japanese for a Type name: this Category's own entry first, then any other (empty if none was written yet). */
+    juce::String japaneseForType (const juce::String& category, const juce::String& name) const;
     juce::StringArray getWarnings() const { return warnings; }
     /** What the last sync did (e.g. "types.csv was regenerated"); informational. */
     juce::StringArray getNotices() const { return notices; }

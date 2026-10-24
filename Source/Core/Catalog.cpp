@@ -497,6 +497,20 @@ void Catalog::reload()
     sendChangeMessage();
 }
 
+juce::String Catalog::japaneseForType (const juce::String& category, const juce::String& name) const
+{
+    juce::String other;
+    for (const auto& [c, t] : types)
+        if (t.name.equalsIgnoreCase (name) && t.jp.isNotEmpty())
+        {
+            if (c.equalsIgnoreCase (category))
+                return t.jp;
+            if (other.isEmpty())
+                other = t.jp;
+        }
+    return other;
+}
+
 std::vector<TypeInfo> Catalog::getTypes (const juce::String& category, bool includeCommon) const
 {
     std::vector<TypeInfo> out;

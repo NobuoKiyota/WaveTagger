@@ -34,6 +34,14 @@ public:
 
     //== palette / naming
     const MarkerType& getType (int slot) const { return types[(size_t) slot]; }
+    /** "<n>  <Type>   <Japanese>" for lists and menus; the Japanese comes from whoever set the lookup (the catalog). */
+    std::function<juce::String (const juce::String& typeName)> japaneseOf;
+    juce::String describeType (int slot) const
+    {
+        auto text = juce::String (slot + 1) + "  " + types[(size_t) slot].name;
+        const auto jp = japaneseOf ? japaneseOf (types[(size_t) slot].name) : juce::String();
+        return jp.isNotEmpty() ? text + "   " + jp : text;
+    }
     bool isTypeUsable (int slot) const { return slot >= 0 && slot < numSlots && types[(size_t) slot].name.isNotEmpty(); }
     void setTypeName (int slot, const juce::String& name);
 

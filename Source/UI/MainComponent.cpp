@@ -24,6 +24,8 @@ constexpr int transportHeight = 62;
 
 MainComponent::MainComponent()
 {
+    cycles.japaneseOf = [this] (const juce::String& name) { return catalog.japaneseForType (cycles.getCategory(), name); };
+
     formats.registerBasicFormats();
     setWantsKeyboardFocus (true);
 
