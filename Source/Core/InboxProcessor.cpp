@@ -185,7 +185,11 @@ InboxOutcome processInboxFile (const juce::File& file, const InboxOptions& optio
         return out;
     }
 
-    if (! part.moveFileTo (dest))
+    // The verified copy is only the source for the next step: the markers are written while the final file is made, so that the
+    // final file is created by a plain move and never replaces another file (a "replace" is what security software objects to).
+    const auto src = dest.getSiblingFile (dest.getFileNameWithoutExtension() + ".src~.wav");
+    src.deleteFile();
+    if (! part.moveFileTo (src))
     {
         part.deleteFile();
         out.error = "cannot finish " + dest.getFullPathName();
@@ -194,10 +198,10 @@ InboxOutcome processInboxFile (const juce::File& file, const InboxOptions& optio
 
     // --- 2. split + embed
     juce::String loadError;
-    const auto audio = loadAudioFile (formats, dest, loadError);
+    const auto audio = loadAudioFile (formats, src, loadError);
     if (audio == nullptr)
     {
-        dest.deleteFile();
+        src.deleteFile();
         out.error = loadError.isNotEmpty() ? loadError : "cannot read the copy";
         return out;
     }
@@ -256,7 +260,8 @@ InboxOutcome processInboxFile (const juce::File& file, const InboxOptions& optio
     }
     out.minConfidence = minConfidence <= 1.0f ? minConfidence : -1.0f;
 
-    const auto result = embedMarkers (dest, dest, buildEmbedRequest (model, audio->sampleRate, options.appVersion));
+    const auto result = embedMarkers (src, dest, buildEmbedRequest (model, audio->sampleRate, options.appVersion));
+    src.deleteFile();
     if (! result.ok)
     {
         dest.deleteFile(); // the original is still in the inbox, so it will simply be retried

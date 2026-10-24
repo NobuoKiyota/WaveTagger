@@ -78,7 +78,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--selftest-export" || args[0] == "--selftest-matrix" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--selftest-export" || args[0] == "--selftest-matrix" || args[0] == "--report-import" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -94,6 +94,7 @@ public:
                                         : args[0] == "--selftest-dictionary" ? selfTestDictionary()
                                         : args[0] == "--selftest-export" ? selfTestExport()
                                         : args[0] == "--selftest-matrix" ? selfTestMatrix()
+                                        : args[0] == "--report-import" ? reportImport()
                                         : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
@@ -1383,6 +1384,41 @@ private:
         fresh.setDirectory (seedDir);
         check (fresh.getTypes ("TOOLS", false).size() > 0 && fresh.getTypes ("TOOLS", false).size() <= 20, "a fresh workbook is seeded with the matrix filled for the Categories that have Types");
         return ok;
+    }
+
+    /** Runs the Inbox import on a COPY of the file named by WT_IMPORT_FILE, inside WT_APPDATA (diagnosis of a failing recording). */
+    bool reportImport()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        const juce::File source (juce::SystemStats::getEnvironmentVariable ("WT_IMPORT_FILE", {}));
+        if (testRoot.getFullPathName().isEmpty() || ! source.existsAsFile())
+        {
+            std::printf ("set WT_IMPORT_FILE to a recording\n");
+            return false;
+        }
+
+        const auto base = testRoot.getChildFile ("import_report");
+        base.deleteRecursively();
+        const auto inbox = base.getChildFile ("inbox"), raw = base.getChildFile ("raw");
+        inbox.createDirectory();
+        raw.createDirectory();
+        const auto file = inbox.getChildFile (source.getFileName());
+        source.copyFileTo (file);
+
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        InboxOptions options;
+        options.inbox = inbox;
+        options.raw = raw;
+        std::printf ("importing %s (%lld bytes)\n", file.getFileName().toRawUTF8(), (long long) file.getSize());
+        std::fflush (stdout);
+        const auto r = processInboxFile (file, options, formats);
+        std::printf ("ok=%d cycles=%d error=%s\n", (int) r.ok, r.cycles, r.error.toRawUTF8());
+        std::printf ("leftovers in raw:");
+        for (const auto& f : raw.findChildFiles (juce::File::findFiles, true, "*"))
+            std::printf (" %s", f.getFileName().toRawUTF8());
+        std::printf ("\n");
+        return r.ok;
     }
 
     bool selfTestChecks()

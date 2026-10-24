@@ -4,11 +4,6 @@ Comprehensive SFX Catalog Definition for WaveTagger.
 Generates categories with matrix types (TYPE01..TYPE10) and full Japanese translations for Types sheet.
 """
 
-import openpyxl
-import json
-import os
-import sys
-
 # Category definitions: Name -> (Japanese, Prefix, Note, [(Type, Japanese), ...])
 # Exactly 9 or 10 types per category. First 9 types will be used in the 9-slot palette.
 CATALOG_DATA = {
@@ -546,6 +541,44 @@ CATALOG_DATA = {
         ("Heavy", "厚手衣擦れ"),
         ("Light", "薄手衣擦れ"),
         ("Friction", "摩擦音"),
+    ]),
+
+    # --- Props & Furnishings (User Requested Categories) ---
+    "CURTAINS": ("カーテン", "CRTN", "カーテン・暗幕・レース・ブラインド", [
+        ("Open", "開く"),
+        ("Close", "閉じる"),
+        ("Rail", "レール音"),
+        ("Rustle", "布擦れ"),
+        ("Swish", "シャーッと引く"),
+        ("Shake", "はたく・揺らす"),
+        ("Hook", "フック・留め具"),
+        ("Tie", "タッセルで留める"),
+        ("Flap", "はためく"),
+        ("Drop", "垂らす"),
+    ]),
+    "PROPS": ("小物", "PROP", "小道具・日用品・身の回りの小物", [
+        ("Rattle", "カタカタ"),
+        ("PickUp", "持ち上げる"),
+        ("Put", "置く"),
+        ("Drop", "落とす"),
+        ("Slide", "滑らせる"),
+        ("Shake", "振る"),
+        ("Tap", "小突く"),
+        ("Scrape", "擦る"),
+        ("Sort", "探る・選別"),
+        ("Clatter", "カチャカチャ"),
+    ]),
+    "BELL_TREE": ("ベルツリー", "BLTR", "ツリーチャイム・ベルツリー効果音", [
+        ("Long", "長い"),
+        ("Short", "短い"),
+        ("Up", "上昇"),
+        ("Down", "下降"),
+        ("Fast", "高速"),
+        ("Slow", "低速"),
+        ("Hit", "単音・打撃"),
+        ("Shimmer", "揺らぎ・トレモロ"),
+        ("Swell", "クレッシェンド"),
+        ("Damp", "消音・ミュート"),
     ]),
 
     # --- Materials ---
