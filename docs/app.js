@@ -283,6 +283,19 @@
     }).then(uploadPending).catch(function (e) { $('info').textContent = 'エラー: ' + (e.message || e); });
   });
 
+  // a setup link (#cid=<client id>&f=<folder URL or ID>) fills the settings, so nothing has to be typed on the phone
+  (function () {
+    var h = location.hash.replace(/^#/, '');
+    if (!h) return;
+    var p = {};
+    h.split('&').forEach(function (kv) { var i = kv.indexOf('='); if (i > 0) p[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1)); });
+    if (p.cid || p.f) {
+      var cur = loadSettings();
+      saveSettings({ clientId: (p.cid || cur.clientId || '').trim(), folder: p.f ? folderIdOf(p.f) : cur.folder });
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  })();
+
   var s0 = loadSettings();
   $('clientId').value = s0.clientId || '';
   $('folder').value = s0.folder || '';
