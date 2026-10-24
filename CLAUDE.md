@@ -95,3 +95,9 @@
 - 書き出し先は `<Category>/<Prefix>[/<Type>]` (`exportSubFolder`)。Prefix が Category と大文字小文字違いで同じなら Prefix の階層は作らない。`Export ▾` →「Type ごとのフォルダに分けて書き出す」で Type 階層を追加 (PC ごとの設定 `exportTypeFolders`)
 - 書き出し先で番号が使用済みなら、空いている次の番号にする (`renumberForDestination`。上書きしない、同じ書き出しの中の順序は保つ)。「続きから」はライブラリ索引、こちらは書き出し先フォルダの実在を見る
 - 検証: `--selftest-export` (9 項目)
+
+## Category x Type マトリクス (catalog.xlsx)
+- Categories シート: `Category, Japanese, Note, Prefix, TYPE01..TYPE10` (Category の右に Type を書く。10 個埋める必要も、重複も可)。日本語は Types シート (`Category, Type, Japanese, Note`) に書く
+- マトリクスの Type は列順に採用 (空欄・重複は無視)。その後に Types シートの Category 別の行が続く。日本語は Types シートから引く (その Category の行 → 共通 `*` や他の Category の行の順)
+- マトリクスにあって Types シートに無い Type は、起動/再読込時に Types シートへ 1 行追加される (日本語は空欄で、記入待ち)
+- 検証: `--selftest-matrix` (10 項目)

@@ -78,7 +78,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--selftest-export" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--selftest-export" || args[0] == "--selftest-matrix" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -93,6 +93,7 @@ public:
                                         : args[0] == "--selftest-dataset" ? selfTestDataset()
                                         : args[0] == "--selftest-dictionary" ? selfTestDictionary()
                                         : args[0] == "--selftest-export" ? selfTestExport()
+                                        : args[0] == "--selftest-matrix" ? selfTestMatrix()
                                         : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
@@ -1302,6 +1303,85 @@ private:
         other[0].subFolder = "Pen/Other";
         check (renumberForDestination (other, root, nameFor) == 0 && other[0].fileName == "Pen_Hit01", "another folder has its own numbers");
         root.deleteRecursively();
+        return ok;
+    }
+
+    bool selfTestMatrix()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+            return false;
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+        const auto jp = [] (const char* t) { return juce::String::fromUTF8 (t); };
+
+        const auto dir = testRoot.getChildFile ("matrix_test");
+        dir.deleteRecursively();
+        dir.createDirectory();
+        testRoot.getChildFile ("catalog_state.json").deleteFile();
+
+        juce::StringArray head { "Category", "Japanese", "Note", "Prefix" };
+        for (int i = 1; i <= 10; ++i)
+            head.add ("TYPE" + juce::String (i).paddedLeft ('0', 2));
+
+        std::vector<xlsx::Sheet> sheets;
+        sheets.push_back ({ "Categories", { head,
+                                            { "PEN", jp ("ペン"), "", "", "Hit", "Tap", "Hit", "", "Write" },
+                                            { "GLASS", jp ("ガラス"), "", "", "hit", "Break" },
+                                            { "EMPTY", jp ("空"), "" } } });
+        sheets.push_back ({ "Types", { { "Category", "Type", "Japanese", "Note" },
+                                       { "*", "Hit", jp ("打撃"), "" },
+                                       { "PEN", "Scratch", jp ("引っかき"), "" } } });
+        juce::String error;
+        check (xlsx::write (dir.getChildFile ("catalog.xlsx"), sheets, error), "a workbook with the matrix is written");
+
+        Catalog c;
+        c.setDirectory (dir);
+        const auto names = [&] (const juce::String& cat, bool common) {
+            juce::StringArray out;
+            for (const auto& t : c.getTypes (cat, common))
+                out.add (t.name);
+            return out.joinIntoString (",");
+        };
+
+        check (names ("PEN", false) == "Hit,Tap,Write,Scratch", "the matrix gives the Types in order (blanks and repeats skipped), then the Types sheet's own rows");
+        check (names ("GLASS", false) == "hit,Break", "another Category has its own row");
+        check (names ("EMPTY", false).isEmpty(), "a Category with an empty row has no Types of its own");
+        check (c.getTypes ("PEN", false)[0].jp == jp ("打撃"), "the Japanese of a matrix Type comes from the Types sheet (also from the common row)");
+        check (c.getTypes ("PEN", false)[1].jp.isEmpty(), "a Type without Japanese yet has none");
+
+        std::vector<xlsx::Sheet> after;
+        xlsx::read (dir.getChildFile ("catalog.xlsx"), after, error);
+        juce::StringArray typeNames;
+        for (const auto& sh : after)
+            if (sh.name == "Types")
+                for (const auto& r : sh.rows)
+                    typeNames.add (r[1]);
+        check (typeNames.contains ("Tap") && typeNames.contains ("Write") && typeNames.contains ("Break") && ! typeNames.contains ("hit")
+                   && typeNames.size() == 1 + 2 + 3,
+               "Types that were only in the matrix got a row in the Types sheet (Hit already had one)");
+        check (c.getNotices().joinIntoString (" ").contains ("added to the Types sheet"), "the app says so");
+
+        const auto rowsBefore = typeNames.size();
+        c.reload();
+        std::vector<xlsx::Sheet> again;
+        xlsx::read (dir.getChildFile ("catalog.xlsx"), again, error);
+        size_t rowsNow = 0;
+        for (const auto& sh : again)
+            if (sh.name == "Types")
+                rowsNow = sh.rows.size();
+        check ((int) rowsNow == rowsBefore, "reloading adds nothing more");
+
+        Catalog fresh;
+        const auto seedDir = testRoot.getChildFile ("matrix_seed");
+        seedDir.deleteRecursively();
+        testRoot.getChildFile ("catalog_state.json").deleteFile();
+        fresh.setDirectory (seedDir);
+        check (fresh.getTypes ("TOOLS", false).size() > 0 && fresh.getTypes ("TOOLS", false).size() <= 20, "a fresh workbook is seeded with the matrix filled for the Categories that have Types");
         return ok;
     }
 

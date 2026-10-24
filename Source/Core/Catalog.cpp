@@ -116,11 +116,22 @@ void writeState (const SyncState& st)
     writeJson (stateFile(), juce::var (o));
 }
 
+constexpr int maxMatrixTypes = 10;
+
 void seedRows (std::vector<juce::StringArray>& categoryRows, std::vector<juce::StringArray>& typeRows)
 {
-    categoryRows = { { "Category", "Japanese", "Note", "Prefix" } };
+    juce::StringArray header { "Category", "Japanese", "Note", "Prefix" };
+    for (int i = 1; i <= maxMatrixTypes; ++i)
+        header.add ("TYPE" + juce::String (i).paddedLeft ('0', 2));
+    categoryRows = { header };
     for (const auto& c : wt::getCategories())
-        categoryRows.push_back ({ c.name, c.jp, "", "" });
+    {
+        juce::StringArray row { c.name, c.jp, "", "" };
+        for (const auto& t : seedTypes)
+            if (juce::String (t.category) == juce::String (c.name) && row.size() < 4 + maxMatrixTypes)
+                row.add (t.name);
+        categoryRows.push_back (row);
+    }
 
     typeRows = { { "Category", "Type", "Japanese", "Note" } };
     for (const auto& t : seedTypes)
@@ -399,6 +410,7 @@ void Catalog::reload()
     }
 
     line = 0;
+    std::vector<std::pair<juce::String, TypeInfo>> sheetTypes;
     for (const auto& r : typeRows)
     {
         ++line;
@@ -409,7 +421,77 @@ void Catalog::reload()
         if (cat != commonCategory && ! seen.contains (cat, true))
             warnings.add ("Types: category " + cat + " is not in Categories");
 
-        types.push_back ({ cat, { r[1].trim(), r[2].trim(), r[3].trim() } });
+        sheetTypes.push_back ({ cat, { r[1].trim(), r[2].trim(), r[3].trim() } });
+    }
+
+    // the matrix: TYPE01.. on each Category's row, in that order; Japanese comes from the Types sheet
+    std::vector<int> typeColumns;
+    if (! catRows.empty())
+        for (int c = 0; c < catRows.front().size(); ++c)
+            if (catRows.front()[c].trim().startsWithIgnoreCase ("TYPE"))
+                typeColumns.push_back (c);
+
+    const auto japaneseFor = [&] (const juce::String& cat, const juce::String& name) {
+        TypeInfo found;
+        for (const auto& [c, t] : sheetTypes)
+            if (t.name.equalsIgnoreCase (name) && t.jp.isNotEmpty())
+            {
+                if (c.equalsIgnoreCase (cat))
+                    return t;
+                if (found.jp.isEmpty())
+                    found = t;
+            }
+        return found;
+    };
+
+    std::vector<std::pair<juce::String, TypeInfo>> matrix;
+    std::vector<std::pair<juce::String, juce::String>> missing; // in the matrix, not in the Types sheet at all
+    juce::StringArray matrixSeen;
+    for (const auto& r : catRows)
+    {
+        if (r.size() == 0 || r[0].trim().isEmpty() || r[0].trim().equalsIgnoreCase ("Category"))
+            continue;
+        const auto cat = r[0].trim();
+        if (matrixSeen.contains (cat, true))
+            continue;
+        matrixSeen.add (cat);
+
+        juce::StringArray own;
+        for (const auto c : typeColumns)
+        {
+            const auto name = r[c].trim();
+            if (name.isEmpty() || own.contains (name, true))
+                continue;
+            own.add (name);
+
+            auto info = japaneseFor (cat, name);
+            if (info.name.isEmpty())
+            {
+                info.name = name;
+                const auto known = std::any_of (sheetTypes.begin(), sheetTypes.end(), [&] (const auto& e) { return e.second.name.equalsIgnoreCase (name); });
+                if (! known && std::none_of (missing.begin(), missing.end(), [&] (const auto& e) { return e.second.equalsIgnoreCase (name); }))
+                    missing.push_back ({ cat, name });
+            }
+            info.name = name; // the spelling written in the matrix wins
+            matrix.push_back ({ cat, info });
+        }
+    }
+
+    types = std::move (matrix);
+    types.insert (types.end(), sheetTypes.begin(), sheetTypes.end());
+
+    // every Type written in the matrix gets a row in Types, so that its Japanese can be written there
+    if (! missing.empty() && ! fillingMissing && getWorkbookFile().existsAsFile())
+    {
+        fillingMissing = true;
+        auto allWritten = true;
+        for (const auto& [cat, name] : missing)
+            allWritten = appendRow (true, { cat, name, "", "" }) && allWritten;
+        reload();
+        if (allWritten)
+            notices.add (juce::String ((int) missing.size()) + " Types were added to the Types sheet (Japanese to be filled in)");
+        fillingMissing = false;
+        return;
     }
 
     sendChangeMessage();

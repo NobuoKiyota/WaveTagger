@@ -27,8 +27,9 @@ struct TypeInfo
     other tools and AIs. If a CSV is edited directly instead, its content is merged back into the workbook
     (the old workbook is kept as catalog.xlsx.bak-<time>). Excel's plain "CSV" (Shift-JIS) is read correctly too.
 
-      Categories : Category, Japanese, Note
-      Types      : Category, Type, Japanese, Note        (Category "*" = common to every category)
+      Categories : Category, Japanese, Note, Prefix, TYPE01 ... TYPE10   (the Types of a Category go on its row; blanks and repeats are fine)
+      Types      : Category, Type, Japanese, Note        (the Japanese for each Type; Category "*" = common to every category)
+    A Type written in the matrix that has no row in Types yet gets one added (Japanese left empty to be filled in).
 */
 class Catalog : public juce::ChangeBroadcaster
 {
@@ -85,6 +86,7 @@ private:
     std::vector<std::pair<juce::String, TypeInfo>> types; // category -> type
     juce::StringArray warnings, notices;
     std::map<juce::String, int> usage;
+    bool fillingMissing = false;
     juce::String loadedStamp, categorySheetName { "Categories" }, typeSheetName { "Types" };
 };
 } // namespace wt
