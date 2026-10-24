@@ -2,6 +2,9 @@
 
 #include "AudioData.h"
 #include "Conditioning.h"
+#include <functional>
+#include <map>
+#include <set>
 
 namespace wt
 {
@@ -11,7 +14,16 @@ struct ExportItem
     juce::String subFolder; // relative to the output root
     juce::String fileName;  // without extension
     juce::String comment;   // stored in the WAV INFO chunk
+    int type = -1, number = 0; // what the name was made from, so that it can be renumbered against what the destination holds
 };
+
+/** The folder under the output root: <Category>/<Prefix>[/<Type>]. A Prefix that is just the Category again (any case) adds no level. */
+juce::String exportSubFolder (const juce::String& category, const juce::String& prefix, const juce::String& typeName, bool typeFolders);
+
+/** Keeps every file name free in its folder: where the number is already taken (on disk, or by an earlier item of this export),
+    the next free number is used instead. Nothing is ever overwritten. Returns how many items got a different number. */
+int renumberForDestination (std::vector<ExportItem>& items, const juce::File& root,
+                            const std::function<juce::String (int type, int number)>& nameFor);
 
 struct ExportResult
 {

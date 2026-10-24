@@ -2,6 +2,59 @@
 
 namespace wt
 {
+juce::String exportSubFolder (const juce::String& category, const juce::String& prefix, const juce::String& typeName, bool typeFolders)
+{
+    juce::StringArray parts;
+    const auto cat = juce::File::createLegalFileName (category.trim());
+    const auto pre = juce::File::createLegalFileName (prefix.trim());
+    if (cat.isNotEmpty())
+        parts.add (cat);
+    if (pre.isNotEmpty() && ! pre.equalsIgnoreCase (cat))
+        parts.add (pre);
+    if (typeFolders && typeName.isNotEmpty())
+        parts.add (juce::File::createLegalFileName (typeName.trim()));
+    return parts.joinIntoString ("/");
+}
+
+int renumberForDestination (std::vector<ExportItem>& items, const juce::File& root,
+                            const std::function<juce::String (int, int)>& nameFor)
+{
+    std::map<juce::String, int> lastInGroup; // folder + type -> the last number given in this export
+    std::set<juce::String> taken;            // folder/name pairs given in this export
+    int changed = 0;
+
+    for (auto& item : items)
+    {
+        if (item.type < 0 || item.number <= 0)
+            continue;
+
+        const auto dir = item.subFolder.isEmpty() ? root : root.getChildFile (item.subFolder);
+        const auto group = item.subFolder + "|" + juce::String (item.type);
+        auto n = item.number;
+        if (const auto it = lastInGroup.find (group); it != lastInGroup.end() && n <= it->second)
+            n = it->second + 1; // the numbers of one export keep their order
+
+        for (;; ++n)
+        {
+            const auto name = nameFor (item.type, n);
+            if (! dir.getChildFile (name + ".wav").exists() && taken.count (item.subFolder + "/" + name.toLowerCase()) == 0)
+            {
+                if (n != item.number)
+                {
+                    item.comment = item.comment.replace ("no=" + juce::String (item.number) + ";", "no=" + juce::String (n) + ";");
+                    item.number = n;
+                    ++changed;
+                }
+                item.fileName = name;
+                taken.insert (item.subFolder + "/" + name.toLowerCase());
+                break;
+            }
+        }
+        lastInGroup[group] = n;
+    }
+    return changed;
+}
+
 ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>& items, const juce::File& root,
                            int bitsPerSample, float fadeMs, const ConditionOptions& conditioning)
 {

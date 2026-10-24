@@ -78,7 +78,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--selftest-export" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -92,6 +92,7 @@ public:
                                         : args[0] == "--selftest-rating" ? selfTestRating()
                                         : args[0] == "--selftest-dataset" ? selfTestDataset()
                                         : args[0] == "--selftest-dictionary" ? selfTestDictionary()
+                                        : args[0] == "--selftest-export" ? selfTestExport()
                                         : args[0] == "--report-learn" ? reportLearn()
                                         : args[0] == "--report-checks" ? reportChecks()
                                                                        : selfTestCatalogLoad()) ? 0 : 1);
@@ -1257,6 +1258,53 @@ private:
     }
 
     /** Spelling variants and duplicates: what must be found, and what must NOT be. */
+    bool selfTestExport()
+    {
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+
+        check (exportSubFolder ("GLASS", "Glass", "Hit", false) == "GLASS", "a Prefix that repeats the Category (any case) adds no folder level");
+        check (exportSubFolder ("TOOLS", "Pen", "Hit", false) == "TOOLS/Pen", "otherwise <Category>/<Prefix>");
+        check (exportSubFolder ("TOOLS", "Pen", "Hit", true) == "TOOLS/Pen/Hit", "with Type folders: <Category>/<Prefix>/<Type>");
+        check (exportSubFolder ("GLASS", "Glass", "Hit", true) == "GLASS/Hit" && exportSubFolder ("", "Pen", "Hit", true) == "Pen/Hit", "Type folders without a repeated Prefix or Category");
+
+        const auto root = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {})).getChildFile ("export_test");
+        root.deleteRecursively();
+        root.getChildFile ("Pen/Hit").createDirectory();
+        for (const auto* n : { "Pen_Hit01", "Pen_Hit02", "Pen_Hit04" })
+            root.getChildFile ("Pen/Hit").getChildFile (juce::String (n) + ".wav").replaceWithText ("x");
+
+        const auto nameFor = [] (int type, int number) { return juce::String (type == 0 ? "Pen_Hit" : "Pen_Drop") + juce::String (number).paddedLeft ('0', 2); };
+        const auto make = [] (int type, int number) {
+            ExportItem it;
+            it.type = type;
+            it.number = number;
+            it.subFolder = "Pen/Hit";
+            it.comment = "no=" + juce::String (number) + "; src=a";
+            return it;
+        };
+
+        std::vector<ExportItem> items { make (0, 1), make (0, 2), make (0, 3), make (1, 1) };
+        const auto changed = renumberForDestination (items, root, nameFor);
+        check (items[0].fileName == "Pen_Hit03" && items[1].fileName == "Pen_Hit05" && items[2].fileName == "Pen_Hit06",
+               "taken numbers (01, 02, 04) are skipped; the export keeps its order (03, 05, 06)");
+        check (items[3].fileName == "Pen_Drop01" && changed == 3, "another Type is unaffected; the number of changes is reported");
+        check (items[1].comment.contains ("no=5;"), "the stored number follows the new name");
+
+        std::vector<ExportItem> again { make (0, 7), make (0, 7) };
+        renumberForDestination (again, root, nameFor);
+        check (again[0].fileName == "Pen_Hit07" && again[1].fileName == "Pen_Hit08", "two equal numbers inside one export never collide");
+
+        std::vector<ExportItem> other { make (0, 1) };
+        other[0].subFolder = "Pen/Other";
+        check (renumberForDestination (other, root, nameFor) == 0 && other[0].fileName == "Pen_Hit01", "another folder has its own numbers");
+        root.deleteRecursively();
+        return ok;
+    }
+
     bool selfTestChecks()
     {
         const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));

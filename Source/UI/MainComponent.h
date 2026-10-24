@@ -79,6 +79,8 @@ public:
     std::vector<DatasetClip> testDatasetClips (int& untyped) const { return collectDatasetClips (untyped); }
     void testSetCursor (juce::int64 sample) { view.setCursor (sample); }
     std::vector<ExportItem> testExportItems (int& untyped, int& ng) const { return collectExportItems (untyped, ng); }
+    void testSetExportTypeFolders (bool on) { exportTypeFolders = on; }
+    juce::String testNameFor (int type, int number) const { return cycles.nameFor (type, number); }
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -233,6 +235,7 @@ private:
     std::unique_ptr<juce::VBlankAttachment> vblank;
     juce::String statusText;
     bool wasPlaying = false;
+    bool exportTypeFolders = false; // <Category>/<Prefix>/<Type>/ instead of <Category>/<Prefix>/
     juce::File snapshotOutput, exportDir, rawDir, inboxDir, organizedDir, datasetDir;
     bool inboxWatch = false;
     juce::String backlogDecidedFor;

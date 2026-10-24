@@ -90,3 +90,8 @@
 - データセット (`addToDataset(..., &dictionary)`): `caption_en/ja`・`tags_en/ja` の属性の語をそれぞれの言語にそろえる。`attributes` は打ったまま + `attributes_en` / `attributes_ja`。訳が無い語は両側とも原文のままで、行の `untranslated` と `DatasetResult::untranslated` に残る。**訳を足してからもう一度追加すると、音声はそのままでキャプションだけ更新される**。書き出しジョブには辞書のスナップショット (コピー) を渡す (ウィンドウでの編集と競合しない)
 - `Core/Csv` (`parseCsv` / `toCsvLine` / `readCsvRows` / `csvBytes`): `Catalog.cpp` から切り出して共用 (動作は同じ)
 - 検証: `--selftest-dictionary` (34 項目)。画面確認: `--snapshot-dictionary <out.png>`
+
+## 書き出しのフォルダと番号
+- 書き出し先は `<Category>/<Prefix>[/<Type>]` (`exportSubFolder`)。Prefix が Category と大文字小文字違いで同じなら Prefix の階層は作らない。`Export ▾` →「Type ごとのフォルダに分けて書き出す」で Type 階層を追加 (PC ごとの設定 `exportTypeFolders`)
+- 書き出し先で番号が使用済みなら、空いている次の番号にする (`renumberForDestination`。上書きしない、同じ書き出しの中の順序は保つ)。「続きから」はライブラリ索引、こちらは書き出し先フォルダの実在を見る
+- 検証: `--selftest-export` (9 項目)

@@ -269,6 +269,7 @@ void MainComponent::loadSettings()
     useDictionaryFolder();
 
     exportDir = juce::File (s.getProperty ("exportDir", "").toString());
+    exportTypeFolders = (bool) s.getProperty ("exportTypeFolders", false);
     rawDir = juce::File (s.getProperty ("rawDir", "").toString());
     inboxDir = juce::File (s.getProperty ("inboxDir", "").toString());
     organizedDir = juce::File (s.getProperty ("organizedDir", "").toString());
@@ -332,6 +333,7 @@ void MainComponent::saveNow()
     // this PC only: where things are on this machine
     auto* local = new juce::DynamicObject();
     local->setProperty ("exportDir", exportDir.getFullPathName());
+    local->setProperty ("exportTypeFolders", exportTypeFolders);
     local->setProperty ("rawDir", rawDir.getFullPathName());
     local->setProperty ("inboxDir", inboxDir.getFullPathName());
     local->setProperty ("organizedDir", organizedDir.getFullPathName());
@@ -1159,7 +1161,6 @@ std::vector<ExportItem> MainComponent::collectExportItems (int& untyped, int& ng
     untyped = 0;
     ng = 0;
 
-    const auto folder = juce::File::createLegalFileName (cycles.getPrefix().trim());
     for (int i = 0; i < cycles.size(); ++i)
     {
         const auto& c = cycles[i];
@@ -1177,7 +1178,9 @@ std::vector<ExportItem> MainComponent::collectExportItems (int& untyped, int& ng
         ExportItem item;
         item.start = c.start;
         item.end = c.end;
-        item.subFolder = cycles.getCategory().isNotEmpty() ? cycles.getCategory() + "/" + folder : folder;
+        item.subFolder = exportSubFolder (cycles.getCategory(), cycles.getPrefix(), cycles.typeNameOf (c.type), exportTypeFolders);
+        item.type = c.type;
+        item.number = cycles.numberOf (i);
         item.fileName = cycles.nameOf (i);
         item.comment = "WaveTagger type=" + cycles.typeNameOf (c.type) + "; no=" + juce::String (cycles.numberOf (i))
                        + "; src=" + audio->file.getFileName();
@@ -1199,6 +1202,8 @@ void MainComponent::showExportMenu()
     menu.addItem (3, WT_U8 ("データセットの場所を変更...") + (datasetDir.isDirectory() ? "   (" + datasetDir.getFullPathName() + ")" : juce::String()));
     menu.addItem (4, WT_U8 ("翻訳辞書..."));
     menu.addItem (5, WT_U8 ("Raw フォルダ全体をデータセットに追加..."), datasetJob == nullptr);
+    menu.addSeparator();
+    menu.addItem (6, WT_U8 ("Type ごとのフォルダに分けて書き出す"), true, exportTypeFolders);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&exportButton), [safe] (int r) {
@@ -1214,6 +1219,11 @@ void MainComponent::showExportMenu()
             safe->showDictionary();
         else if (r == 5)
             safe->startRawDatasetExport();
+        else if (r == 6)
+        {
+            safe->exportTypeFolders = ! safe->exportTypeFolders;
+            safe->scheduleSave();
+        }
     });
 }
 
@@ -1506,7 +1516,7 @@ void MainComponent::startExport()
 {
     int untyped = 0, ng = 0;
     auto items = collectExportItems (untyped, ng);
-    const auto folder = juce::File::createLegalFileName (cycles.getPrefix().trim());
+    const auto folder = exportSubFolder (cycles.getCategory(), cycles.getPrefix(), exportTypeFolders ? "<Type>" : juce::String(), exportTypeFolders);
 
     if (items.empty())
     {
@@ -1527,20 +1537,23 @@ void MainComponent::startExport()
 
     chooser = std::make_unique<juce::FileChooser> (title, start);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                          [this, items = std::move (items), untyped, ng, options = conditioning.options] (const juce::FileChooser& fc) {
+                          [this, items = std::move (items), untyped, ng, options = conditioning.options] (const juce::FileChooser& fc) mutable {
                               const auto root = fc.getResult();
                               if (! root.isDirectory())
                                   return;
+
+                              // a number that is already taken in the destination is skipped, never overwritten
+                              const auto renumbered = renumberForDestination (items, root, [this] (int type, int number) { return cycles.nameFor (type, number); });
 
                               exportDir = root;
                               scheduleSave();
 
                               juce::Component::SafePointer<MainComponent> safe (this);
                               auto data = audio;
-                              const auto dest = root.getChildFile (items.front().subFolder);
-                              loader.addJob ([safe, data, items, untyped, ng, root, dest, options] {
+                              const auto dest = root.getChildFile (exportSubFolder (cycles.getCategory(), cycles.getPrefix(), {}, false));
+                              loader.addJob ([safe, data, items, untyped, ng, root, dest, options, renumbered] {
                                   const auto result = exportCycles (*data, items, root, 24, 2.0f, options);
-                                  juce::MessageManager::callAsync ([safe, result, untyped, ng, root, dest, options] {
+                                  juce::MessageManager::callAsync ([safe, result, untyped, ng, root, dest, options, renumbered] {
                                       if (safe != nullptr && result.written > 0)
                                       {
                                           safe->afterExport (dest);
@@ -1566,6 +1579,8 @@ void MainComponent::startExport()
                                           }
                                           msg += WT_U8 ("\n\n整音しました: ") + lines.joinIntoString ("\n");
                                       }
+                                      if (renumbered > 0)
+                                          msg += "\n\n" + juce::String (renumbered) + WT_U8 (" 件は番号が書き出し先で使用済みだったため、空いている次の番号にしました");
                                       if (untyped > 0)
                                           msg += "\n\n" + juce::String (untyped) + WT_U8 (" 件は未分類のためスキップしました");
                                       if (ng > 0)
