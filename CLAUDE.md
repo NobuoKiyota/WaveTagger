@@ -105,7 +105,10 @@
 ## スマホ録音 (ブラウザ版 WaveTagger Rec, `docs/`)
 - GitHub Pages (`/docs`) で公開する PWA。スマホのブラウザで 48kHz/24bit WAV を録音し、停止すると Google Drive の指定フォルダ (Inbox が監視しているもの) へ自動アップロード。設定手順は `docs/SETUP.md`
 - `wav.js` (24bit WAV 書き出し) / `worklet.js` (AudioWorklet で録音) / `app.js` (録音・IndexedDB の送信待ち・Google サインイン (GIS トークン)・Drive 再開可能アップロード)。クライアント ID と保存先フォルダは端末の localStorage (リポジトリには秘密を置かない)
-- 検証: `node Tools/test_wav.js` (WAV の独立確認)。ブラウザでの録音〜アップロードの流れは、偽の音源と偽の Drive で確認済み。実機のマイク・実 Drive・画面オフ時の挙動は未確認
+- **録音フォーマット切り替え**: ステレオ/モノラル、48/44.1 kHz、24/16 bit (端末の localStorage `wtrec.format`、録音中は固定)。ステレオを選んでもマイクが 1 チャンネル (`track.getSettings().channelCount`) ならモノラルで録る (画面に表示)。モノラルは 1 チャンネルのノードに繋いでブラウザに混ぜさせる。16 bit は TPDF ディザ (`wav.js` の `encodeWav`、同じ録音なら同じファイル)。保存した録音に `format` を持たせ、一覧に表示
+- **入力レベルの確認 (録音前)**: 「入力レベルを確認」で、マイクを開いてメーターだけ動かす (録音はしない)。録音ボタンを押すとそのマイクをそのまま使う (開き直さない)。メーターをタップでピーク・CLIP・Integrated をリセット。**LUFS** は `docs/loudness.js` (BS.1770、Momentary 0.4 秒 / Short-term 3 秒 / Integrated ゲート付き。アプリ本体の C++ と同じ K 特性) を録音中・確認中ずっと更新。左右別のピーク (dBFS) も表示
+- 検証: `node Tools/test_wav.js` (WAV の独立確認。16 bit・ディザを含む)、`node Tools/test_loudness.js` (EBU の -23 LUFS 基準、モノラル、ゲート、窓、チャンクサイズ非依存)。ブラウザでの録音〜アップロードの流れは、偽の音源と偽の Drive で確認済み。フォーマット切り替え・レベル確認・LUFS・保存された WAV のヘッダは、偽のマイク (1 kHz -20 dBFS のサイン波) でブラウザ上で確認済み。実機のマイク・実 Drive・画面オフ時の挙動は未確認
+- PWA のキャッシュは `sw.js` の `wtrec-v2` (ファイルを増やしたら `FILES` に足して、版を上げる)
 
 ## 新規 Category と Type の追加 (`Core/CategoryTypes`, `UI/NewCategoryDialog`)
 - 「Category を追加」(カテゴリ選択の下) は、名前と日本語に加えて **Type の案 (最大 10 個、English / 日本語、編集可)** を決めてから書き込む。案の出し方は 3 つ: (1) **似たカテゴリからコピー** (`rankSimilarCategories`: 名前の語・語頭の一致と日本語の包含/共通 2 文字で並べ、最良を自動で選ぶ。一致が無ければ共通の Type。一覧から手で選べる)、(2) **AI に聞く** (質問文をクリップボードへコピー → Gemini/Claude などに貼る → 返事をコピーして「AI の返事を読み込む」)、(3) 手入力 (↑ で並べ替え)。**API キーも通信も使わない**

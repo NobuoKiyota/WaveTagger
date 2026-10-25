@@ -22,6 +22,20 @@
   .meter .peak { position:absolute; top:0; bottom:0; width:3px; background:#fff; opacity:.85; left:0; }
   .meter.hot { border-color:var(--rec); }
   .scale { position:relative; height:16px; font-size:11px; color:var(--dim); }
+  .meterbox { cursor:pointer; }
+  .lufs { display:flex; justify-content:space-between; gap:6px; margin-top:8px; text-align:center; font-variant-numeric:tabular-nums; }
+  .lufs div { flex:1; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:4px 2px; }
+  .lufs b { display:block; font-size:20px; font-weight:600; }
+  .lufs small { color:var(--dim); font-size:11px; }
+  .peaks { display:flex; justify-content:space-between; align-items:center; margin-top:6px; font-size:13px; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .clip { color:#fff; background:var(--rec); border-radius:6px; padding:0 8px; font-weight:700; }
+  .seg { display:flex; gap:6px; margin:6px 0 10px; }
+  .seg button { flex:1; padding:9px 4px; }
+  .seg button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .seg.disabled { opacity:.45; pointer-events:none; }
+  #monitor { width:100%; margin-top:12px; }
+  #monitor.on { border-color:var(--ok); color:var(--ok); }
+  button:disabled { opacity:.45; }
   .scale span { position:absolute; transform:translateX(-50%); }
   .time { font-size:44px; font-variant-numeric:tabular-nums; text-align:center; margin:18px 0 6px; }
   .info { text-align:center; color:var(--dim); min-height:1.5em; }
@@ -46,13 +60,29 @@
 <body>
 <h1><span>WaveTagger Rec</span><button class="gear" id="gear" aria-label="設定">設定</button></h1>
 
-<div class="meterbox">
+<div class="meterbox" id="meterbox" title="タップでピーク・クリップ・Integrated をリセット">
   <div class="meter" id="meter"><div id="bar"></div><i class="peak" id="peak"></i></div>
   <div class="scale"><span style="left:0%;transform:none">-60</span><span style="left:33.3%">-40</span><span style="left:66.7%">-20</span><span style="left:83.3%">-10</span><span style="left:100%;transform:translateX(-100%)">0 dB</span></div>
+  <div class="peaks"><span id="peaks">ピーク  L --  /  R --  dBFS</span><span class="clip hidden" id="clip">CLIP</span></div>
+  <div class="lufs" id="lufs">
+    <div><small>Momentary</small><b data-k="lm">--</b></div>
+    <div><small>Short-term</small><b data-k="ls">--</b></div>
+    <div><small>Integrated</small><b data-k="li">--</b></div>
+  </div>
+  <div class="small" style="text-align:right">LUFS  ·  メーターをタップでリセット</div>
 </div>
 <div class="time" id="time">00:00</div>
 <div class="info" id="info">待機中</div>
+<button id="monitor">入力レベルを確認</button>
 <div class="recwrap"><button id="rec">録音</button></div>
+
+<div class="box" id="formatBox">
+  <h2>録音フォーマット</h2>
+  <div class="seg" id="segCh"><button data-v="stereo">ステレオ</button><button data-v="mono">モノラル</button></div>
+  <div class="seg" id="segRate"><button data-v="48000">48 kHz</button><button data-v="44100">44.1 kHz</button></div>
+  <div class="seg" id="segBits"><button data-v="24">24 bit</button><button data-v="16">16 bit</button></div>
+  <p class="small" style="margin:0">ステレオでも、端末のマイクが 1 チャンネルなら、モノラルで録音されます。録音中は変えられません。</p>
+</div>
 
 <div class="box hidden" id="settings">
   <h2>設定</h2>
@@ -65,7 +95,7 @@
     <button id="connect">Google に接続</button>
   </div>
   <p class="small" id="auth">未接続</p>
-  <p class="small">録音は 48 kHz / 24 bit の WAV。保存先はパソコンの Inbox が監視しているフォルダにしてください。</p>
+  <p class="small">録音は WAV (初期値は 48 kHz / 24 bit / ステレオ。「録音フォーマット」で変えられます)。保存先はパソコンの Inbox が監視しているフォルダにしてください。</p>
 </div>
 
 <div class="box">
@@ -75,6 +105,7 @@
 </div>
 
 <script src="wav.js"></script>
+<script src="loudness.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

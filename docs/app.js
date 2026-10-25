@@ -151,48 +151,169 @@
     }).then(function () { uploading = false; return renderList(); }, function (e) { uploading = false; throw e; });
   }
 
-  // ---------------------------------------------------------------- recording
-  var ctx = null, stream = null, node = null, source = null, chunks = [], channels = 1, rate = TARGET_RATE;
-  var recording = false, startedAt = 0, timer = null, wake = null, level = 0, peakPos = 0, peakAt = 0;
+  // ---------------------------------------------------------------- input: the level check and the recording share one open microphone
+  var ctx = null, stream = null, node = null, source = null, chunks = [], channels = 1, rate = TARGET_RATE, bits = 24;
+  var opening = null; // the microphone is being opened
+  var recording = false, monitoring = false, flushing = false, flushDone = null, startedAt = 0, timer = null, wake = null;
+  var meter = null;                    // loudness (Loudness.createMeter)
+  var peakNow = [0, 0], peakHold = [0, 0], clipped = false, peakPos = 0, peakAt = 0;
+  var formatNote = '';
+
+  // the format the user chose (kept on this phone)
+  var FORMAT_KEY = 'wtrec.format';
+  function loadFormat() {
+    var f = {};
+    try { f = JSON.parse(localStorage.getItem(FORMAT_KEY) || '{}'); } catch (e) { /* ignore */ }
+    return { channels: f.channels === 'mono' ? 'mono' : 'stereo', rate: f.rate === 44100 ? 44100 : 48000, bits: f.bits === 16 ? 16 : 24 };
+  }
+  function saveFormat(f) {
+    try { localStorage.setItem(FORMAT_KEY, JSON.stringify(f)); } catch (e) { /* private mode */ }
+  }
+  var format = loadFormat();
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function stamp(d) {
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '_' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds());
   }
+  function formatText(ch, hz, b) { return hz + ' Hz / ' + b + ' bit / ' + (ch === 2 ? 'ステレオ' : 'モノラル'); }
+  function dbOf(v) { return v > 0 ? 20 * Math.log10(v) : -Infinity; }
+  function fmtDb(v) { return v === -Infinity || v !== v ? '--' : v.toFixed(1); }
 
-  function startRecording() {
-    var constraints = { audio: { channelCount: { ideal: 2 }, sampleRate: { ideal: TARGET_RATE }, echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+  function wakeOn() {
+    if (navigator.wakeLock && !wake) navigator.wakeLock.request('screen').then(function (l) { wake = l; }, function () {});
+  }
+  function wakeOff() {
+    if (wake) { wake.release(); wake = null; }
+  }
+
+  function resetReadout() {
+    peakNow = [0, 0]; peakHold = [0, 0]; clipped = false;
+    if (meter) meter.reset();
+  }
+
+  // One block of input from the worklet: it feeds the meters, and it is kept only while recording.
+  function onBlock(e) {
+    var d = e.data;
+    if (d === 'flushed') { if (flushDone) flushDone(); return; }
+    if (!Array.isArray(d)) return;
+    if (recording || flushing) chunks.push(d);
+    if (!meter) return;
+
+    var pk = WavEnc.peaksOf(d);
+    for (var c = 0; c < pk.length && c < 2; c++) {
+      if (pk[c] > peakNow[c]) peakNow[c] = pk[c];
+      if (pk[c] > peakHold[c]) peakHold[c] = pk[c];
+      if (pk[c] >= 0.999) clipped = true;
+    }
+    meter.push(d);
+  }
+
+  // Opens the microphone (once; the level check and the recording both use it).
+  function openInput() {
+    if (stream) return Promise.resolve();
+    if (opening) return opening;
+    opening = openInputNow().then(function () { opening = null; }, function (e) { opening = null; throw e; });
+    return opening;
+  }
+
+  function openInputNow() {
+    var wantStereo = format.channels === 'stereo';
+    var constraints = { audio: { channelCount: { ideal: wantStereo ? 2 : 1 }, sampleRate: { ideal: format.rate }, echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
     return navigator.mediaDevices.getUserMedia(constraints).then(function (s) {
       stream = s;
-      ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+      ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: format.rate });
       rate = ctx.sampleRate;
       return ctx.audioWorklet.addModule('worklet.js');
     }).then(function () {
       source = ctx.createMediaStreamSource(stream);
-      var count = (stream.getAudioTracks()[0].getSettings().channelCount) || 1;
-      channels = Math.min(2, Math.max(1, count));
-      node = new AudioWorkletNode(ctx, 'recorder', { channelCount: channels, channelCountMode: 'explicit', numberOfOutputs: 0 });
+      var have = (stream.getAudioTracks()[0].getSettings().channelCount) || 1;
+      // stereo only if the microphone really gives two channels; mono is always one (a two-channel input is mixed down by the browser)
+      channels = wantStereo ? Math.min(2, Math.max(1, have)) : 1;
+      bits = format.bits;
+      formatNote = (wantStereo && channels === 1 ? ' (この端末のマイクは 1 チャンネルなので、モノラルになります)' : '')
+                   + (rate !== format.rate ? ' (端末が ' + format.rate + ' Hz に対応していません)' : '');
+
+      meter = Loudness.createMeter(rate, channels);
+      resetReadout();
       chunks = [];
-      node.port.onmessage = function (e) {
-        if (e.data === 'flushed' || !Array.isArray(e.data)) return;
-        chunks.push(e.data);
-        level = WavEnc.peakOf(e.data);
-      };
+      node = new AudioWorkletNode(ctx, 'recorder', { channelCount: channels, channelCountMode: 'explicit', numberOfOutputs: 0 });
+      node.port.onmessage = onBlock;
       source.connect(node);
-      recording = true;
-      startedAt = Date.now();
-      if (navigator.wakeLock) navigator.wakeLock.request('screen').then(function (l) { wake = l; }, function () {});
+      wakeOn();
       tick();
       timer = setInterval(tick, 100);
+    }).catch(function (e) {
+      closeInput();
+      throw e;
+    });
+  }
+
+  function closeInput() {
+    clearInterval(timer);
+    timer = null;
+    if (node) node.port.onmessage = null;
+    try { if (source) source.disconnect(); } catch (e) { /* already gone */ }
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    if (ctx) ctx.close();
+    stream = ctx = node = source = meter = null;
+    monitoring = false;
+    wakeOff();
+    peakNow = [0, 0];
+    showIdle();
+  }
+
+  function showIdle() {
+    $('bar').style.width = '0%';
+    $('peak').style.left = '0%';
+    $('meter').classList.remove('hot');
+    $('time').textContent = '00:00';
+    ['lm', 'ls', 'li'].forEach(function (id) { $('lufs').querySelector('[data-k="' + id + '"]').textContent = '--'; });
+    $('peaks').textContent = 'ピーク  L --  /  R --  dBFS';
+    $('clip').classList.add('hidden');
+    $('monitor').textContent = '入力レベルを確認';
+    $('monitor').classList.remove('on');
+    peakPos = 0;
+  }
+
+  function setBusy() {
+    var busy = recording;
+    ['segCh', 'segRate', 'segBits'].forEach(function (id) { $(id).classList.toggle('disabled', busy); });
+    $('monitor').disabled = busy;
+  }
+
+  function startMonitor() {
+    return openInput().then(function () {
+      monitoring = true;
+      $('monitor').textContent = '確認を止める';
+      $('monitor').classList.add('on');
+      $('info').textContent = 'レベル確認中 (録音はしていません)  ' + formatText(channels, rate, bits) + formatNote;
+    });
+  }
+
+  function stopMonitor() {
+    closeInput();
+    $('info').textContent = '待機中';
+  }
+
+  function startRecording() {
+    return openInput().then(function () {
+      meter.reset();                    // the integrated loudness is that of this recording
+      peakHold = [0, 0]; clipped = false;
+      chunks = [];
+      recording = true;
+      monitoring = false;
+      startedAt = Date.now();
+      setBusy();
       $('rec').textContent = '停止';
       $('rec').classList.add('on');
-      $('info').textContent = rate + ' Hz / 24 bit / ' + (channels === 2 ? 'ステレオ' : 'モノラル') + (rate !== TARGET_RATE ? ' (端末が 48 kHz に対応していません)' : '');
+      $('monitor').textContent = '入力レベルを確認';
+      $('monitor').classList.remove('on');
+      $('info').textContent = formatText(channels, rate, bits) + formatNote;
     });
   }
 
   function stopRecording() {
     recording = false;
-    clearInterval(timer);
     $('rec').classList.remove('on');
     $('rec').textContent = '録音';
     $('info').textContent = '保存中...';
@@ -202,31 +323,31 @@
 
     return new Promise(function (resolve) {
       var done = false;
-      var finish = function () { if (!done) { done = true; resolve(); } };
-      node.port.onmessage = function (e) {
-        if (Array.isArray(e.data)) { chunks.push(e.data); return; }
-        if (e.data === 'flushed') finish();
-      };
+      var finish = function () { if (!done) { done = true; flushing = false; flushDone = null; resolve(); } };
+      flushing = true;
+      flushDone = finish;
       node.port.postMessage('flush');
       setTimeout(finish, 500);
     }).then(function () {
-      source.disconnect();
-      stream.getTracks().forEach(function (t) { t.stop(); });
-      ctx.close();
-      if (wake) { wake.release(); wake = null; }
-
-      var enc = WavEnc.encodeWav24(chunks, channels, rate);
+      var fmt = { channels: channels, rate: rate, bits: bits };
+      var enc = WavEnc.encodeWav(chunks, fmt.channels, fmt.rate, fmt.bits);
       chunks = [];
+      closeInput();
+      setBusy();
+
       var blob = new Blob(enc.parts, { type: 'audio/wav' });
       var name = stamp(new Date(startedAt)) + '.wav';
-      return putRec({ id: name, name: name, blob: blob, size: blob.size, status: 'wait', error: '', createdAt: startedAt, seconds: enc.frames / rate })
+      return putRec({ id: name, name: name, blob: blob, size: blob.size, status: 'wait', error: '', createdAt: startedAt, seconds: enc.frames / fmt.rate, format: fmt })
         .then(function () { $('info').textContent = '保存しました: ' + name; return renderList(); });
     }).then(function () { return auth; }).then(function () { return uploadPending(); });
   }
 
+  // 10 times a second: the time, the level meter (peak, with a hold) and the loudness figures
   function tick() {
-    var sec = Math.floor((Date.now() - startedAt) / 1000);
+    var sec = recording ? Math.floor((Date.now() - startedAt) / 1000) : 0;
     $('time').textContent = pad(Math.floor(sec / 60)) + ':' + pad(sec % 60);
+
+    var level = Math.max(peakNow[0], peakNow[1]);
     var db = level > 0 ? 20 * Math.log10(level) : -120;
     var pos = Math.max(0, Math.min(1, (db + 60) / 60));
     $('bar').style.width = (pos * 100) + '%';
@@ -235,7 +356,16 @@
     else if (Date.now() - peakAt > 1500) peakPos = Math.max(pos, peakPos - 0.02);
     $('peak').style.left = 'calc(' + (peakPos * 100) + '% - 3px)';
     $('meter').classList.toggle('hot', level > 0.97);
-    level *= 0.8;
+    peakNow = [peakNow[0] * 0.8, peakNow[1] * 0.8];
+
+    if (meter) {
+      var set = function (k, v) { $('lufs').querySelector('[data-k="' + k + '"]').textContent = fmtDb(v); };
+      set('lm', meter.momentary());
+      set('ls', meter.shortTerm());
+      set('li', meter.integrated());
+    }
+    $('peaks').textContent = 'ピーク  L ' + fmtDb(dbOf(peakHold[0])) + (channels === 2 ? '  /  R ' + fmtDb(dbOf(peakHold[1])) : '') + '  dBFS';
+    $('clip').classList.toggle('hidden', !clipped);
   }
 
   // ---------------------------------------------------------------- UI
@@ -250,7 +380,7 @@
       recs.slice(0, 20).forEach(function (r) {
         var li = document.createElement('li');
         var a = document.createElement('span');
-        a.textContent = r.name + '  ' + Math.round(r.seconds || 0) + ' 秒';
+        a.textContent = r.name + '  ' + Math.round(r.seconds || 0) + ' 秒' + (r.format ? '  ' + (r.format.channels === 2 ? 'ステレオ' : 'モノラル') + ' ' + r.format.bits + 'bit' : '');
         var b = document.createElement('span');
         if (r.status === 'done') { b.className = 'st-done'; b.textContent = 'Drive に送信済み'; }
         else if (r.status === 'fail') { b.className = 'st-fail'; b.textContent = '失敗: ' + r.error; waiting++; }
@@ -264,6 +394,41 @@
   $('rec').addEventListener('click', function () {
     var p = recording ? stopRecording() : startRecording();
     p.catch(function (e) { $('info').textContent = 'エラー: ' + (e && e.message ? e.message : e); });
+  });
+  $('monitor').addEventListener('click', function () {
+    if (recording) return;
+    var p = monitoring ? Promise.resolve(stopMonitor()) : startMonitor();
+    p.catch(function (e) { $('info').textContent = 'エラー: ' + (e && e.message ? e.message : e); });
+  });
+  // tap the meter: peak hold, the clip mark and the integrated loudness start over
+  $('meterbox').addEventListener('click', function () { resetReadout(); tick(); });
+
+  // format: stereo / mono, 48 / 44.1 kHz, 24 / 16 bit (not while recording; a running level check is restarted with the new format)
+  function showFormat() {
+    [['segCh', 'channels'], ['segRate', 'rate'], ['segBits', 'bits']].forEach(function (pair) {
+      var buttons = $(pair[0]).querySelectorAll('button');
+      for (var i = 0; i < buttons.length; i++) buttons[i].classList.toggle('on', String(format[pair[1]]) === buttons[i].getAttribute('data-v'));
+    });
+  }
+  [['segCh', 'channels'], ['segRate', 'rate'], ['segBits', 'bits']].forEach(function (pair) {
+    $(pair[0]).addEventListener('click', function (ev) {
+      var b = ev.target.closest('button');
+      if (!b || recording) return;
+      var v = b.getAttribute('data-v');
+      format[pair[1]] = pair[1] === 'channels' ? v : Number(v);
+      saveFormat(format);
+      showFormat();
+
+      // the bit depth only matters when the file is written; the channels and the rate need the microphone opened again
+      if (pair[1] === 'bits') { if (stream) bits = format.bits; if (monitoring) $('info').textContent = 'レベル確認中 (録音はしていません)  ' + formatText(channels, rate, bits) + formatNote; return; }
+      if (monitoring || opening) {
+        (opening || Promise.resolve()).catch(function () { /* reported where it was started */ }).then(function () {
+          if (recording) return;
+          closeInput();
+          return startMonitor();
+        }).catch(function (e) { $('info').textContent = 'エラー: ' + (e && e.message ? e.message : e); });
+      }
+    });
   });
   $('gear').addEventListener('click', function () { $('settings').classList.toggle('hidden'); });
   $('save').addEventListener('click', function () {
@@ -303,6 +468,7 @@
   else $('settings').classList.add('hidden');
   showAuth();
   renderList();
-  $('bar').style.width = '0%';
+  showFormat();
+  showIdle();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
 })();
