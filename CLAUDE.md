@@ -126,3 +126,10 @@
 - 書き込み (`Catalog::addCategoryWithTypes`): Categories シートに 1 行 (`TYPE01`〜 に English) → Types シートに日本語つきで 1 Type 1 行。Category 行が先なので途中で失敗しても Type は全部載る (足りない Types の行は次回の読み込みで補われる)。既存の Category は変更しない。古い形式 (TYPE 列の無い) のブックでも Types の行で拾える
 - **修正**: `Catalog::getTypes ("*", false)` は空を返す (共通 Type は**空のカテゴリ**で引く)。`JapaneseNames::from` がこれを使っていたため、Raw 一括追加で共通 Type (Hit など) の日本語が引けていなかった → 修正済み
 - 検証: `--selftest-newcategory` (40 項目)。画面確認: `--snapshot-newcategory <out.png>`
+
+## Android ネイティブ (`android/`, 検証用 `StereoTest`)
+- 目的: スマホの内蔵マイクをブラウザ経由ではなく `AudioRecord` で開き、**本物のステレオ**で録れるかを確かめる。ブラウザ (Chrome/Firefox) は通話・音声用の経路でマイクを渡すため、左右が同じ音 (モノラルの複製) になる。最終形は 今の `docs/` の画面 (タブ・メーター・スコープ) を WebView に載せ、マイクの取り込みだけ Kotlin にする案
+- `android/StereoTest` (Kotlin、依存なし、minSdk 26 / target 34): 入力元 MIC / CAMCORDER / UNPROCESSED / VOICE_RECOGNITION / VOICE_COMMUNICATION を 6 秒ずつ ステレオ 48 kHz (float32、だめなら int16) で録り、経路・チャンネル数・使われているマイク (`activeMicrophones`)・ピーク・L/R 相関・最大差・0.25 秒ごとの L-R レベル差を表示、「左右が完全に同一 / ほぼ同一 / 別の音」を判定
+- ビルド: `cd android\StereoTest; $env:JAVA_HOME='C:\Program Files\Java\jdk-20'; .\gradlew.bat assembleDebug` (Gradle 8.6 / AGP 8.3.2 / Kotlin 1.9.22 は `%USERPROFILE%\.gradle` にある。Android Studio 同梱の JDK 25 は Gradle 8.6 が使えない)。`local.properties` (sdk.dir) は Git に入れない。出力 `appuild\outputspk\debugpp-debug.apk`、コピーを `android\WTStereoTest.apk` (Git に入れない)
+- **実機 (S21) では未実行**。結果次第で、本格的なネイティブ録音 (フォアグラウンドサービス、WAV 書き出し、Drive 送信、WebView の画面) に進む
+
