@@ -21,6 +21,10 @@
   .meter > div { height:100%; width:0; background:linear-gradient(90deg, var(--ok) 0 70%, var(--warn) 85%, var(--rec)); background-size:var(--full, 100%) 100%; background-repeat:no-repeat; }
   .meter .peak { position:absolute; top:0; bottom:0; width:3px; background:#fff; opacity:.85; left:0; }
   .meter.hot { border-color:var(--rec); }
+  .mrow { display:flex; align-items:center; gap:6px; margin-top:4px; }
+  .mrow:first-child { margin-top:0; }
+  .mrow b { width:14px; font-size:12px; color:var(--dim); text-align:center; font-weight:600; }
+  .mrow .meter { flex:1; height:20px; }
   .scale { position:relative; height:16px; font-size:11px; color:var(--dim); }
   .meterbox { cursor:pointer; }
   .lufs { display:flex; justify-content:space-between; gap:6px; margin-top:8px; text-align:center; font-variant-numeric:tabular-nums; }
@@ -61,8 +65,9 @@
 <h1><span>WaveTagger Rec</span><button class="gear" id="gear" aria-label="設定">設定</button></h1>
 
 <div class="meterbox" id="meterbox" title="タップでピーク・クリップ・Integrated をリセット">
-  <div class="meter" id="meter"><div id="bar"></div><i class="peak" id="peak"></i></div>
-  <div class="scale"><span style="left:0%;transform:none">-60</span><span style="left:33.3%">-40</span><span style="left:66.7%">-20</span><span style="left:83.3%">-10</span><span style="left:100%;transform:translateX(-100%)">0 dB</span></div>
+  <div class="mrow"><b id="labL">L</b><div class="meter" id="meterL"><div id="barL"></div><i class="peak" id="peakL"></i></div></div>
+  <div class="mrow" id="rowR"><b>R</b><div class="meter" id="meterR"><div id="barR"></div><i class="peak" id="peakR"></i></div></div>
+  <div class="scale" style="margin-left:20px"><span style="left:0%;transform:none">-60</span><span style="left:33.3%">-40</span><span style="left:66.7%">-20</span><span style="left:83.3%">-10</span><span style="left:100%;transform:translateX(-100%)">0 dB</span></div>
   <div class="peaks"><span id="peaks">ピーク  L --  /  R --  dBFS</span><span class="clip hidden" id="clip">CLIP</span></div>
   <div class="lufs" id="lufs">
     <div><small>Momentary</small><b data-k="lm">--</b></div>

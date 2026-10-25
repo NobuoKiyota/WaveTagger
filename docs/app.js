@@ -156,7 +156,7 @@
   var opening = null; // the microphone is being opened
   var recording = false, monitoring = false, flushing = false, flushDone = null, startedAt = 0, timer = null, wake = null;
   var meter = null;                    // loudness (Loudness.createMeter)
-  var peakNow = [0, 0], peakHold = [0, 0], clipped = false, peakPos = 0, peakAt = 0;
+  var peakNow = [0, 0], peakHold = [0, 0], clipped = false, peakPos = [0, 0], peakAt = [0, 0];
   var formatNote = '';
 
   // the format the user chose (kept on this phone)
@@ -234,6 +234,7 @@
                    + (rate !== format.rate ? ' (端末が ' + format.rate + ' Hz に対応していません)' : '');
 
       meter = Loudness.createMeter(rate, channels);
+      showChannels(channels);
       resetReadout();
       chunks = [];
       node = new AudioWorkletNode(ctx, 'recorder', { channelCount: channels, channelCountMode: 'explicit', numberOfOutputs: 0 });
@@ -263,16 +264,25 @@
   }
 
   function showIdle() {
-    $('bar').style.width = '0%';
-    $('peak').style.left = '0%';
-    $('meter').classList.remove('hot');
+    showChannels(format.channels === 'stereo' ? 2 : 1);
+    ['L', 'R'].forEach(function (c) {
+      $('bar' + c).style.width = '0%';
+      $('peak' + c).style.left = '0%';
+      $('meter' + c).classList.remove('hot');
+    });
     $('time').textContent = '00:00';
     ['lm', 'ls', 'li'].forEach(function (id) { $('lufs').querySelector('[data-k="' + id + '"]').textContent = '--'; });
     $('peaks').textContent = 'ピーク  L --  /  R --  dBFS';
     $('clip').classList.add('hidden');
     $('monitor').textContent = '入力レベルを確認';
     $('monitor').classList.remove('on');
-    peakPos = 0;
+    peakPos = [0, 0];
+  }
+
+  // stereo: two bars (L and R); mono: one
+  function showChannels(n) {
+    $('rowR').classList.toggle('hidden', n !== 2);
+    $('labL').textContent = n === 2 ? 'L' : 'M';
   }
 
   function setBusy() {
@@ -347,15 +357,17 @@
     var sec = recording ? Math.floor((Date.now() - startedAt) / 1000) : 0;
     $('time').textContent = pad(Math.floor(sec / 60)) + ':' + pad(sec % 60);
 
-    var level = Math.max(peakNow[0], peakNow[1]);
-    var db = level > 0 ? 20 * Math.log10(level) : -120;
-    var pos = Math.max(0, Math.min(1, (db + 60) / 60));
-    $('bar').style.width = (pos * 100) + '%';
-    $('bar').style.setProperty('--full', (100 / Math.max(pos, 0.01)) + '%');
-    if (pos >= peakPos) { peakPos = pos; peakAt = Date.now(); }
-    else if (Date.now() - peakAt > 1500) peakPos = Math.max(pos, peakPos - 0.02);
-    $('peak').style.left = 'calc(' + (peakPos * 100) + '% - 3px)';
-    $('meter').classList.toggle('hot', level > 0.97);
+    ['L', 'R'].forEach(function (c, ch) {
+      var level = peakNow[ch];
+      var db = level > 0 ? 20 * Math.log10(level) : -120;
+      var pos = Math.max(0, Math.min(1, (db + 60) / 60));
+      $('bar' + c).style.width = (pos * 100) + '%';
+      $('bar' + c).style.setProperty('--full', (100 / Math.max(pos, 0.01)) + '%');
+      if (pos >= peakPos[ch]) { peakPos[ch] = pos; peakAt[ch] = Date.now(); }
+      else if (Date.now() - peakAt[ch] > 1500) peakPos[ch] = Math.max(pos, peakPos[ch] - 0.02);
+      $('peak' + c).style.left = 'calc(' + (peakPos[ch] * 100) + '% - 3px)';
+      $('meter' + c).classList.toggle('hot', level > 0.97);
+    });
     peakNow = [peakNow[0] * 0.8, peakNow[1] * 0.8];
 
     if (meter) {
@@ -409,6 +421,7 @@
       var buttons = $(pair[0]).querySelectorAll('button');
       for (var i = 0; i < buttons.length; i++) buttons[i].classList.toggle('on', String(format[pair[1]]) === buttons[i].getAttribute('data-v'));
     });
+    if (!stream && !opening) showChannels(format.channels === 'stereo' ? 2 : 1);
   }
   [['segCh', 'channels'], ['segRate', 'rate'], ['segBits', 'bits']].forEach(function (pair) {
     $(pair[0]).addEventListener('click', function (ev) {
