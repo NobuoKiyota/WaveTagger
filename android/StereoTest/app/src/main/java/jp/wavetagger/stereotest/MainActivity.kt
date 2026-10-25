@@ -2,6 +2,7 @@ package jp.wavetagger.stereotest
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.media.AudioDeviceInfo
@@ -47,6 +48,10 @@ class MainActivity : Activity() {
             this.text = "テスト開始 (入力元ごとに 6 秒)"
             setOnClickListener { start() }
         }
+        val recorderButton = Button(this).apply {
+            this.text = "ステレオ録音 (メーターと WAV 保存)"
+            setOnClickListener { startActivity(Intent(this@MainActivity, RecordActivity::class.java)) }
+        }
         text = TextView(this).apply {
             typeface = Typeface.MONOSPACE
             textSize = 11f
@@ -55,6 +60,7 @@ class MainActivity : Activity() {
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
+            addView(recorderButton)
             addView(button)
             addView(
                 ScrollView(this@MainActivity).apply { addView(text) },
