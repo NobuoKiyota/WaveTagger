@@ -1,5 +1,6 @@
 #include "PalettePanel.h"
 #include "CategoryPicker.h"
+#include "NewCategoryDialog.h"
 #include "Theme.h"
 #include "Util/Text.h"
 
@@ -295,24 +296,17 @@ void PalettePanel::reportWriteFailure (const juce::File& file)
 
 void PalettePanel::promptAddCategory()
 {
-    auto* w = new juce::AlertWindow (WT_U8 ("Category を追加"),
-                                     WT_U8 ("英語名(フォルダ名・ファイル名に使います)と日本語名を入力してください。\ncatalog.xlsx の Categories シートに追記されます。"),
-                                     juce::MessageBoxIconType::NoIcon);
-    w->addTextEditor ("name", "", "Category (EN)");
-    w->addTextEditor ("jp", "", WT_U8 ("日本語"));
-    w->addButton (WT_U8 ("追加"), 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton (WT_U8 ("キャンセル"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
-
     juce::Component::SafePointer<PalettePanel> safe (this);
-    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int result) {
-        if (result != 1 || safe == nullptr)
+    NewCategoryDialog::show (catalog, [safe] (const juce::String& name, const juce::String& jp, const std::vector<TypeProposal>& types) {
+        if (safe == nullptr)
             return;
 
-        const auto name = w->getTextEditorContents ("name").trim().toUpperCase();
-        if (name.isEmpty())
-            return;
+        std::vector<std::pair<juce::String, juce::String>> list;
+        for (const auto& t : types)
+            list.push_back ({ t.english, t.japanese });
 
-        if (safe->catalog.addCategory (name, w->getTextEditorContents ("jp")))
+        // the Category row (with TYPE01..) and its Types with their Japanese go into catalog.xlsx
+        if (safe->catalog.addCategoryWithTypes (name, jp, list))
         {
             if (safe->onCategoryChosen)
             {
@@ -328,7 +322,7 @@ void PalettePanel::promptAddCategory()
         {
             safe->reportWriteFailure (safe->catalog.getEditTarget());
         }
-    }), true);
+    });
 }
 
 void PalettePanel::promptAddType (int slot)

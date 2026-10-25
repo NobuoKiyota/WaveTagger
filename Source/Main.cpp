@@ -8,6 +8,7 @@
 #include "Core/Attributes.h"
 #include "Core/Conditioning.h"
 #include "Core/Dataset.h"
+#include "Core/CategoryTypes.h"
 #include "Core/Dictionary.h"
 #include "Core/Exporter.h"
 #include "Core/FeatureStore.h"
@@ -19,6 +20,7 @@
 #include "Core/Xlsx.h"
 #include "UI/AttributeEditor.h"
 #include "UI/CategoryPicker.h"
+#include "UI/NewCategoryDialog.h"
 #include "UI/DictionaryWindow.h"
 #include "UI/InboxWindow.h"
 #include "UI/OrganizerWindow.h"
@@ -78,7 +80,7 @@ public:
         }
 
         if (args.size() >= 1 && (args[0] == "--selftest-catalog" || args[0] == "--selftest-catalog-load" || args[0] == "--selftest-prefs"
-                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--selftest-export" || args[0] == "--selftest-matrix" || args[0] == "--report-import" || args[0] == "--report-learn"))
+                                 || args[0] == "--selftest-wav" || args[0] == "--selftest-inbox" || args[0] == "--selftest-watcher" || args[0] == "--selftest-organize" || args[0] == "--selftest-checks" || args[0] == "--report-checks" || args[0] == "--selftest-learn" || args[0] == "--selftest-condition" || args[0] == "--selftest-rating" || args[0] == "--selftest-dataset" || args[0] == "--selftest-dictionary" || args[0] == "--selftest-export" || args[0] == "--selftest-matrix" || args[0] == "--selftest-newcategory" || args[0] == "--report-import" || args[0] == "--report-learn"))
         {
             setApplicationReturnValue ((args[0] == "--selftest-catalog" ? selfTestCatalog()
                                         : args[0] == "--selftest-prefs" ? selfTestPrefs()
@@ -92,6 +94,7 @@ public:
                                         : args[0] == "--selftest-rating" ? selfTestRating()
                                         : args[0] == "--selftest-dataset" ? selfTestDataset()
                                         : args[0] == "--selftest-dictionary" ? selfTestDictionary()
+                                        : args[0] == "--selftest-newcategory" ? selfTestNewCategory()
                                         : args[0] == "--selftest-export" ? selfTestExport()
                                         : args[0] == "--selftest-matrix" ? selfTestMatrix()
                                         : args[0] == "--report-import" ? reportImport()
@@ -102,7 +105,7 @@ public:
             return;
         }
 
-        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-conditioning" || args[0] == "--snapshot-attributes" || args[0] == "--snapshot-dictionary" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
+        if (args.size() >= 2 && (args[0] == "--snapshot-picker" || args[0] == "--snapshot-conditioning" || args[0] == "--snapshot-attributes" || args[0] == "--snapshot-dictionary" || args[0] == "--snapshot-newcategory" || args[0] == "--snapshot-input" || args[0] == "--snapshot-inbox" || args[0] == "--snapshot-organizer"))
         {
             snapshotComponent (args[0], toFile (args[1]));
             return;
@@ -205,6 +208,12 @@ private:
             hooks.getStatus = [] { return juce::String ("watching"); };
             content = std::make_unique<InboxPanel> (demoQueue, hooks);
         }
+        else if (mode == "--snapshot-newcategory")
+        {
+            auto dialog = std::make_unique<NewCategoryDialog> (catalog, [] (const juce::String&, const juce::String&, const std::vector<TypeProposal>&) {});
+            dialog->setNames ("GLASSWARE", WT_U8 ("ガラス食器"));
+            content = std::move (dialog);
+        }
         else if (mode == "--snapshot-dictionary")
         {
             // a throw-away dictionary with a few user entries, so the list shows both kinds
@@ -248,7 +257,7 @@ private:
                 input->setCurrentTabIndex (tab.getIntValue());
             content = std::move (input);
         }
-        if (mode != "--snapshot-organizer" && mode != "--snapshot-conditioning" && mode != "--snapshot-attributes" && mode != "--snapshot-dictionary")
+        if (mode != "--snapshot-organizer" && mode != "--snapshot-conditioning" && mode != "--snapshot-attributes" && mode != "--snapshot-dictionary" && mode != "--snapshot-newcategory")
             content->setSize (mode == "--snapshot-inbox" ? 1000 : picker ? 400 : 800, mode == "--snapshot-inbox" ? 460 : picker ? 560 : 580);
 
         const auto image = content->createComponentSnapshot (content->getLocalBounds());
@@ -3416,6 +3425,207 @@ private:
             check (Catalog::copyConfigFiles (from, to) == 1 && to.getChildFile ("dictionary.csv").existsAsFile(), "moving to another config folder copies the dictionary too");
             to.getChildFile ("dictionary.csv").replaceWithText ("English,Japanese,Note\r\nmine,mine2,\r\n");
             check (Catalog::copyConfigFiles (from, to) == 0 && to.getChildFile ("dictionary.csv").loadFileAsString().contains ("mine"), "and never over an existing one");
+        }
+
+        return ok;
+    }
+
+    bool selfTestNewCategory()
+    {
+        const auto testRoot = juce::File (juce::SystemStats::getEnvironmentVariable ("WT_APPDATA", {}));
+        if (testRoot.getFullPathName().isEmpty())
+        {
+            std::printf ("FAIL  refusing to run: WT_APPDATA is not set\n");
+            return false;
+        }
+
+        bool ok = true;
+        const auto check = [&ok] (bool cond, const char* what) {
+            std::printf ("%s  %s\n", cond ? "PASS" : "FAIL", what);
+            ok = ok && cond;
+        };
+        const auto ja = [] (const char* s) { return juce::String::fromUTF8 (s); };
+        const auto names = [] (const std::vector<TypeProposal>& v) {
+            juce::StringArray a;
+            for (const auto& t : v)
+                a.add (t.english);
+            return a.joinIntoString (",");
+        };
+
+        // a catalogue of its own, seeded fresh
+        const auto dir = testRoot.getChildFile ("newcat_config");
+        dir.deleteRecursively();
+        const auto stateFile = testRoot.getChildFile ("catalog_state.json");
+        stateFile.deleteFile();
+        Catalog catalog;
+        catalog.setDirectory (dir);
+
+        // ---- what a Category's Types are
+        const auto tools = ownTypesOf (catalog, "TOOLS");
+        check (! tools.empty() && tools.size() <= 10 && tools[0].english == "Open" && tools[0].japanese == ja ("開ける"), "a Category's own Types come in catalogue order with their Japanese");
+        check (ownTypesOf (catalog, "TOOLS", 3).size() == 3 && ownTypesOf (catalog, "NO_SUCH_CATEGORY").empty(), "the count can be limited; an unknown Category has none");
+        const auto common = commonTypes (catalog);
+        check (common.size() == 10 && common[0].english == "Hit" && common[0].japanese == ja ("叩く"), "the common Types are the fallback (first ten)");
+
+        // ---- which Category looks like the new one
+        {
+            const auto toolbox = rankSimilarCategories (catalog, "TOOLBOXES", ja ("道具箱"));
+            check (! toolbox.empty() && toolbox.front().name == "TOOLS" && toolbox.front().score > 0, "TOOLBOXES is most like TOOLS (the start of the word)");
+
+            const auto glassware = rankSimilarCategories (catalog, "GLASSWARE", ja ("ガラス食器"));
+            check (! glassware.empty() && glassware.front().name == "GLASS", "GLASSWARE / ガラス食器 is most like GLASS (word and Japanese)");
+
+            const auto japaneseOnly = rankSimilarCategories (catalog, "PANES", ja ("ガラス窓"));
+            check (! japaneseOnly.empty() && japaneseOnly.front().name == "GLASS", "the Japanese alone can find it (ガラス窓 contains ガラス)");
+
+            const auto nothing = rankSimilarCategories (catalog, "ZZZ", {});
+            check (! nothing.empty() && nothing.front().score == 0 && nothing.front().typeCount >= nothing.back().typeCount,
+                   "nothing in common: everything is still listed, those with the most Types first");
+            check (std::none_of (nothing.begin(), nothing.end(), [] (const SimilarCategory& s) { return s.typeCount == 0; }), "only Categories that have Types of their own are offered for copying");
+        }
+
+        // ---- the question for an AI
+        {
+            const auto prompt = buildAiPrompt (catalog, "curtains", ja ("カーテン"));
+            check (prompt.contains ("CURTAINS (" + ja ("カーテン") + ")") && prompt.contains ("\"types\"") && prompt.contains ("PascalCase") && prompt.contains ("Hit"),
+                   "the question names the Category, asks for JSON and lists the Types that exist");
+            check (prompt.contains ("CLOTH") || prompt.contains ("TOOLS"), "and shows similar Categories as examples");
+            check (buildAiPrompt (catalog, "GLASSWARE", ja ("ガラス食器")).contains ("GLASS ("), "the examples are the Categories that look like it");
+        }
+
+        // ---- reading the answer
+        {
+            std::vector<TypeProposal> t;
+            juce::String error;
+            check (parseAiReply (ja ("{\"types\":[{\"en\":\"Rustle\",\"ja\":\"擦れる\"},{\"en\":\"Flap\",\"ja\":\"はためく\"}]}"), t, error) && t.size() == 2 && t[0].english == "Rustle" && t[1].japanese == ja ("はためく"),
+                   "plain JSON is read");
+
+            check (parseAiReply (ja ("もちろんです。提案は次のとおりです。\n```json\n{\"types\": [{\"en\": \"Rustle\", \"ja\": \"擦れる\"}]}\n```\n以上です。"), t, error) && t.size() == 1 && t[0].english == "Rustle",
+                   "JSON inside a code block with sentences around it is read");
+
+            check (parseAiReply (ja ("[{\"English\":\"Pull\",\"Japanese\":\"引く\"},{\"name\":\"Push\",\"jp\":\"押す\"}]"), t, error) && t.size() == 2 && t[1].english == "Push" && t[1].japanese == ja ("押す"),
+                   "an array without the wrapper, with other key names, is read");
+
+            check (parseAiReply (ja ("{\"types\":[\"Hit=叩く\",\"Tap, 軽く叩く\",\"Slide (滑らせる)\"]}"), t, error) && t.size() == 3 && t[2].english == "Slide" && t[2].japanese == ja ("滑らせる") && t[1].japanese == ja ("軽く叩く"),
+                   "strings such as Hit=叩く, \"Tap, 軽く叩く\" and \"Slide (滑らせる)\" are read");
+
+            check (parseAiReply (ja ("1. Rustle - 擦れる\n2. Flap：はためく\n- Tear\t破る\n* Fold (折る)\nこれは説明の行です。"), t, error) && t.size() == 4 && t[0].english == "Rustle" && t[1].japanese == ja ("はためく")
+                       && t[2].japanese == ja ("破る") && t[3].japanese == ja ("折る"),
+                   "plain numbered / bulleted lines work too (a line of explanation is ignored)");
+
+            check (! parseAiReply ("I could not do that.", t, error) && ! parseAiReply ("no idea", t, error) && ! parseAiReply ("Sure, here are the types:", t, error) && t.empty(),
+                   "a sentence in English is not a list");
+            check (parseAiReply ("Hit\nTap\nPush", t, error) && t.size() == 3 && t[2].english == "Push" && t[2].japanese.isEmpty(), "a plain list of single words is");
+            check (! parseAiReply (ja ("すみません、分かりません。"), t, error) && t.empty() && error.isNotEmpty(), "an answer with nothing to read gives a message and no Types");
+        }
+
+        // ---- making them fit the catalogue
+        {
+            const std::vector<TypeProposal> raw {
+                { "hit", {} },                          // existing: spelled as in the catalogue, Japanese filled in
+                { "rustle sound", ja ("擦れる") },       // two words: one PascalCase word
+                { "RUSTLE", ja ("重複") },               // the same as "Rustle" again (after the first one is taken it is a repeat? no: different word)
+                { "Flap-Wing", " " + ja ("はためく") + " " },
+                { ja ("叩く"), ja ("叩く") },             // no English at all
+                { "   ", "x" },
+                { "WayTooLongToBeAFileNameToken", "x" },
+                { "Hit", ja ("重複") },                  // repeat of the first
+                { "Open", {} },
+            };
+            const auto tidy = tidyProposals (raw, catalog);
+            check (names (tidy) == "Hit,RustleSound,Rustle,FlapWing,Open", "names become one PascalCase word, repeats and unusable ones are dropped, existing spelling is kept");
+            check (tidy.size() == 5 && tidy[0].japanese == ja ("叩く") && tidy[3].japanese == ja ("はためく") && tidy[4].japanese == ja ("開ける"),
+                   "Japanese that was left out is taken from the catalogue; typed Japanese is trimmed");
+
+            std::vector<TypeProposal> many;
+            for (int i = 0; i < 15; ++i)
+                many.push_back ({ "Word" + juce::String ("ABCDEFGHIJKLMNO").substring (i, i + 1), {} });
+            check (tidyProposals (many, catalog).size() == 10, "at most ten are kept");
+        }
+
+        // ---- writing the new Category
+        {
+            const auto categoriesBefore = catalog.getCategories().size();
+            const std::vector<std::pair<juce::String, juce::String>> types {
+                { "Rustle", ja ("擦れる") }, { "Flap", ja ("はためく") }, { "NewWord", ja ("新語") }, { "rustle", "dup" }, { "", "empty" },
+            };
+            check (catalog.addCategoryWithTypes ("curtains", ja ("カーテン"), types), "the Category and its Types are written");
+
+            check (catalog.getCategories().size() == categoriesBefore + 1 && catalog.getCategories().back().name == "CURTAINS" && catalog.getCategories().back().jp == ja ("カーテン"),
+                   "the Category is there (upper case) with its Japanese");
+
+            const auto own = catalog.getTypes ("CURTAINS", false);
+            check (own.size() == 3 && own[0].name == "Rustle" && own[1].name == "Flap" && own[2].name == "NewWord", "its Types are those, in order, without the repeat and the blank");
+            check (own[0].jp == ja ("擦れる") && own[2].jp == ja ("新語") && catalog.japaneseForType ("CURTAINS", "Flap") == ja ("はためく"), "with their Japanese");
+
+            // what is in the workbook
+            std::vector<xlsx::Sheet> sheets;
+            juce::String error;
+            check (xlsx::read (catalog.getWorkbookFile(), sheets, error), "(the workbook can be read back)");
+            int categoryRow = -1, typeRows = 0;
+            for (const auto& sheet : sheets)
+            {
+                if (sheet.name.equalsIgnoreCase ("Categories"))
+                    for (int i = 0; i < (int) sheet.rows.size(); ++i)
+                        if (sheet.rows[(size_t) i].size() > 0 && sheet.rows[(size_t) i][0] == "CURTAINS")
+                            categoryRow = i;
+                if (sheet.name.equalsIgnoreCase ("Types"))
+                    for (const auto& r : sheet.rows)
+                        if (r.size() >= 3 && r[0] == "CURTAINS")
+                            ++typeRows;
+
+                if (sheet.name.equalsIgnoreCase ("Categories") && categoryRow >= 0)
+                {
+                    const auto& r = sheet.rows[(size_t) categoryRow];
+                    check (r.size() >= 7 && r[1] == ja ("カーテン") && r[4] == "Rustle" && r[5] == "Flap" && r[6] == "NewWord", "the Category's row has the Types in TYPE01, TYPE02 ...");
+                }
+            }
+            check (typeRows == 3, "the Types sheet has one row per Type (no second set of empty rows)");
+
+            // a second catalogue object reading the same files sees the same
+            Catalog again;
+            again.setDirectory (dir);
+            check (names (ownTypesOf (again, "CURTAINS")) == "Rustle,Flap,NewWord" && ownTypesOf (again, "CURTAINS")[0].japanese == ja ("擦れる"), "it survives a restart");
+
+            check (juce::File (dir).getChildFile ("categories.csv").loadFileAsString().contains ("CURTAINS") && juce::File (dir).getChildFile ("types.csv").loadFileAsString().contains ("NewWord"),
+                   "the CSV copies are brought up to date");
+
+            // an existing Category is left alone
+            const auto rowsBefore = typeRows;
+            check (catalog.addCategoryWithTypes ("Curtains", {}, { { "Other", "x" } }) && catalog.getTypes ("CURTAINS", false).size() == 3 && rowsBefore == 3, "adding an existing Category changes nothing");
+
+            // more than ten
+            std::vector<std::pair<juce::String, juce::String>> twelve;
+            for (int i = 0; i < 12; ++i)
+                twelve.push_back ({ "Type" + juce::String ("ABCDEFGHIJKL").substring (i, i + 1), {} });
+            check (catalog.addCategoryWithTypes ("TWELVE", {}, twelve) && catalog.getTypes ("TWELVE", false).size() == 10, "no more than ten Types go on a Category's row");
+
+            // none at all: just the Category
+            check (catalog.addCategoryWithTypes ("EMPTYONE", ja ("空"), {}) && catalog.getTypes ("EMPTYONE", false).empty() && ! catalog.getTypes ("EMPTYONE").empty(),
+                   "a Category without Types still gets the common ones to choose from");
+        }
+
+        // ---- the dialog
+        {
+            NewCategoryDialog dialog (catalog, [] (const juce::String&, const juce::String&, const std::vector<TypeProposal>&) {});
+            dialog.setNames ("GLASSWARE", ja ("ガラス食器"));
+            check (names (dialog.currentTypes()) == names (ownTypesOf (catalog, "GLASS")), "the dialog starts with the Types of the most similar Category");
+
+            dialog.setNames ("ZZZ", {});
+            check (names (dialog.currentTypes()) == names (commonTypes (catalog)), "and with the common Types when nothing is similar");
+
+            dialog.applyAiReply (ja ("{\"types\":[{\"en\":\"Rustle\",\"ja\":\"擦れる\"},{\"en\":\"hit\",\"ja\":\"\"}]}"));
+            check (names (dialog.currentTypes()) == "Rustle,Hit" && dialog.currentTypes()[1].japanese == ja ("叩く"), "an AI's answer replaces them (tidied: existing spelling, Japanese filled in)");
+
+            dialog.setNames ("GLASSWARE", ja ("ガラス食器"));
+            check (names (dialog.currentTypes()) == "Rustle,Hit", "names typed afterwards do not undo a choice that was made");
+
+            const auto japaneseNames = JapaneseNames::from (catalog);
+            check (japaneseNames.forType ("TOOLS", "Hit") == ja ("叩く") && japaneseNames.forType ("TOOLS", "Open") == ja ("開ける") && japaneseNames.forCategory ("tools") == ja ("工具"),
+                   "the Japanese names for the dataset include the common Types (Hit under TOOLS)");
+
+            dialog.applyAiReply ("no idea");
+            check (names (dialog.currentTypes()) == "Rustle,Hit", "an answer that cannot be read leaves the Types as they were");
         }
 
         return ok;

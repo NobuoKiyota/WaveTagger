@@ -106,3 +106,11 @@
 - GitHub Pages (`/docs`) で公開する PWA。スマホのブラウザで 48kHz/24bit WAV を録音し、停止すると Google Drive の指定フォルダ (Inbox が監視しているもの) へ自動アップロード。設定手順は `docs/SETUP.md`
 - `wav.js` (24bit WAV 書き出し) / `worklet.js` (AudioWorklet で録音) / `app.js` (録音・IndexedDB の送信待ち・Google サインイン (GIS トークン)・Drive 再開可能アップロード)。クライアント ID と保存先フォルダは端末の localStorage (リポジトリには秘密を置かない)
 - 検証: `node Tools/test_wav.js` (WAV の独立確認)。ブラウザでの録音〜アップロードの流れは、偽の音源と偽の Drive で確認済み。実機のマイク・実 Drive・画面オフ時の挙動は未確認
+
+## 新規 Category と Type の追加 (`Core/CategoryTypes`, `UI/NewCategoryDialog`)
+- 「Category を追加」(カテゴリ選択の下) は、名前と日本語に加えて **Type の案 (最大 10 個、English / 日本語、編集可)** を決めてから書き込む。案の出し方は 3 つ: (1) **似たカテゴリからコピー** (`rankSimilarCategories`: 名前の語・語頭の一致と日本語の包含/共通 2 文字で並べ、最良を自動で選ぶ。一致が無ければ共通の Type。一覧から手で選べる)、(2) **AI に聞く** (質問文をクリップボードへコピー → Gemini/Claude などに貼る → 返事をコピーして「AI の返事を読み込む」)、(3) 手入力 (↑ で並べ替え)。**API キーも通信も使わない**
+- 質問文 (`buildAiPrompt`): カテゴリ名・日本語、条件 (1 語の PascalCase、よく出る順、最初の 9 個がキー 1〜9、既存の綴りを使う)、似たカテゴリの Type の例、既存の Type (よく使われる順 60 個)、JSON の出力形式。返事の読み取り (`parseAiReply`): JSON ({"types":[{"en","ja"}]} / 配列 / `"Hit=叩く"` などの文字列)、コードブロックや前後の文があっても可、`1. Hit - 叩く` のような行も可。**英語の文 (「no idea」「Sure, here are…」) は Type として読まない** (単語 1 つ、または単語+日本語の行だけ)
+- 整形 (`tidyProposals`): English は英数字の PascalCase 1 語・24 文字以内 (日本語や記号は除く)、**カタログにすでにある Type は同じ綴り**にそろえ、日本語が空ならカタログから補う、重複・空欄は除く、最大 10 個
+- 書き込み (`Catalog::addCategoryWithTypes`): Categories シートに 1 行 (`TYPE01`〜 に English) → Types シートに日本語つきで 1 Type 1 行。Category 行が先なので途中で失敗しても Type は全部載る (足りない Types の行は次回の読み込みで補われる)。既存の Category は変更しない。古い形式 (TYPE 列の無い) のブックでも Types の行で拾える
+- **修正**: `Catalog::getTypes ("*", false)` は空を返す (共通 Type は**空のカテゴリ**で引く)。`JapaneseNames::from` がこれを使っていたため、Raw 一括追加で共通 Type (Hit など) の日本語が引けていなかった → 修正済み
+- 検証: `--selftest-newcategory` (40 項目)。画面確認: `--snapshot-newcategory <out.png>`

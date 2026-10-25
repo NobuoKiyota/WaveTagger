@@ -70,6 +70,13 @@ public:
     bool addCategory (const juce::String& name, const juce::String& jp);
     bool addType (const juce::String& category, const juce::String& name, const juce::String& jp);
 
+    /** A new Category together with its Types (English, Japanese), in order: they go on the Category's row as TYPE01.. (at most
+        maxMatrixTypes) and, with their Japanese, into the Types sheet. An existing Category is left as it is (true). False if
+        anything could not be written; the Category row goes first, so a failure part-way leaves a Category whose Types
+        are all listed (the missing Types rows are filled in on the next load). */
+    bool addCategoryWithTypes (const juce::String& name, const juce::String& jp, const std::vector<std::pair<juce::String, juce::String>>& typesInOrder);
+    static constexpr int maxMatrixTypes = 10;
+
     void noteUsed (const juce::String& category);
     /** Indices into getCategories(), most used first. */
     std::vector<int> frequentIndices (int maxCount) const;

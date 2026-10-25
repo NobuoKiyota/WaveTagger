@@ -116,19 +116,17 @@ void writeState (const SyncState& st)
     writeJson (stateFile(), juce::var (o));
 }
 
-constexpr int maxMatrixTypes = 10;
-
 void seedRows (std::vector<juce::StringArray>& categoryRows, std::vector<juce::StringArray>& typeRows)
 {
     juce::StringArray header { "Category", "Japanese", "Note", "Prefix" };
-    for (int i = 1; i <= maxMatrixTypes; ++i)
+    for (int i = 1; i <= Catalog::maxMatrixTypes; ++i)
         header.add ("TYPE" + juce::String (i).paddedLeft ('0', 2));
     categoryRows = { header };
     for (const auto& c : wt::getCategories())
     {
         juce::StringArray row { c.name, c.jp, "", "" };
         for (const auto& t : seedTypes)
-            if (juce::String (t.category) == juce::String (c.name) && row.size() < 4 + maxMatrixTypes)
+            if (juce::String (t.category) == juce::String (c.name) && row.size() < 4 + Catalog::maxMatrixTypes)
                 row.add (t.name);
         categoryRows.push_back (row);
     }
@@ -558,6 +556,38 @@ bool Catalog::addCategory (const juce::String& name, const juce::String& jp)
             return true;
 
     const auto ok = appendRow (false, { clean, jp.trim(), "", "" });
+    reload();
+    return ok;
+}
+
+bool Catalog::addCategoryWithTypes (const juce::String& name, const juce::String& jp, const std::vector<std::pair<juce::String, juce::String>>& typesInOrder)
+{
+    const auto clean = name.trim().toUpperCase();
+    if (clean.isEmpty())
+        return false;
+    for (const auto& c : categories)
+        if (c.name.equalsIgnoreCase (clean))
+            return true; // already there: nothing is changed
+
+    // the Types, as the matrix wants them: no blanks, no repeats, at most TYPE01..TYPE10
+    std::vector<std::pair<juce::String, juce::String>> list;
+    for (const auto& [en, ja] : typesInOrder)
+    {
+        const auto english = en.trim();
+        if (english.isEmpty() || (int) list.size() >= maxMatrixTypes)
+            continue;
+        if (std::none_of (list.begin(), list.end(), [&] (const auto& e) { return e.first.equalsIgnoreCase (english); }))
+            list.push_back ({ english, ja.trim() });
+    }
+
+    juce::StringArray row { clean, jp.trim(), "", "" };
+    for (const auto& e : list)
+        row.add (e.first);
+
+    auto ok = appendRow (false, row);
+    for (const auto& [english, japanese] : list)
+        ok = appendRow (true, { clean, english, japanese, "" }) && ok;
+
     reload();
     return ok;
 }

@@ -419,7 +419,7 @@ JapaneseNames JapaneseNames::from (const Catalog& catalog)
         for (const auto& t : catalog.getTypes (c.name, false))
             names.type[c.name.toLowerCase() + "|" + t.name.toLowerCase()] = t.jp;
     }
-    for (const auto& t : catalog.getTypes (Catalog::commonCategory, false))
+    for (const auto& t : catalog.getTypes ({}, false)) // (an empty Category means the common Types; asking for "*" itself gives nothing)
         names.type[juce::String ("*|") + t.name.toLowerCase()] = t.jp;
     return names;
 }
