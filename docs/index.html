@@ -13,13 +13,15 @@
   html, body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, "Noto Sans JP", sans-serif; }
   body { min-height:100dvh; padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); max-width:520px; margin:0 auto; }
   h1 { font-size:18px; margin:0 0 12px; display:flex; justify-content:space-between; align-items:center; }
+  .hbtns { display:flex; gap:6px; }
+  .gear.on { border-color:var(--accent); color:var(--accent); }
   button { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
   button:active { filter:brightness(1.3); }
   .gear { padding:6px 10px; }
   .meterbox { position:relative; margin-top:4px; }
   .meter { position:relative; height:26px; background:var(--panel); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
-  .meter > div { height:100%; width:0; background:linear-gradient(90deg, var(--ok) 0 70%, var(--warn) 85%, var(--rec)); background-size:var(--full, 100%) 100%; background-repeat:no-repeat; }
-  .meter .peak { position:absolute; top:0; bottom:0; width:3px; background:#fff; opacity:.85; left:0; }
+  .meter > div { height:100%; width:calc(var(--lvl, 0) * 100%); background:linear-gradient(90deg, var(--ok) 0 70%, var(--warn) 85%, var(--rec)); background-size:var(--full, 100%) 100%; background-repeat:no-repeat; }
+  .meter .peak { position:absolute; top:0; bottom:0; width:3px; background:#fff; opacity:.85; left:calc(var(--pk, 0) * 100% - 3px); }
   .meter.hot { border-color:var(--rec); }
   .mrow { display:flex; align-items:center; gap:6px; margin-top:4px; }
   .mrow:first-child { margin-top:0; }
@@ -37,6 +39,9 @@
   .seg button { flex:1; padding:9px 4px; }
   .seg button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
   .seg.disabled { opacity:.45; pointer-events:none; }
+  .controls { display:flex; flex-direction:column; }
+  .vscale { display:none; position:relative; font-size:10px; color:var(--dim); }
+  .vscale span { position:absolute; left:0; right:0; transform:translateY(50%); line-height:1; }
   #monitor { width:100%; margin-top:12px; }
   #monitor.on { border-color:var(--ok); color:var(--ok); }
   button:disabled { opacity:.45; }
@@ -57,16 +62,38 @@
   li:first-child { border-top:0; }
   .st-done { color:var(--ok); } .st-wait { color:var(--warn); } .st-fail { color:var(--rec); }
   .hidden { display:none; }
+  @media (orientation: landscape) and (max-height: 560px) {
+    body { max-width:none; padding:8px 92px; padding-left:calc(92px + env(safe-area-inset-left)); padding-right:calc(92px + env(safe-area-inset-right)); }
+    h1 { margin-bottom:6px; }
+    .mrow { position:fixed; top:8px; bottom:calc(8px + env(safe-area-inset-bottom)); width:76px; margin:0; display:grid; grid-template-rows:auto 1fr; row-gap:4px; align-items:stretch; z-index:5; }
+    .mrow:first-child { margin:0; }
+    #rowL { left:calc(8px + env(safe-area-inset-left)); grid-template-columns:1fr 26px; }
+    #rowR { right:calc(8px + env(safe-area-inset-right)); grid-template-columns:26px 1fr; }
+    .mrow b { grid-column:1 / -1; grid-row:1; width:auto; font-size:14px; }
+    .mrow .meter { grid-row:2; height:auto; }
+    #rowL .meter { grid-column:1; } #rowL .vscale { grid-column:2; }
+    #rowR .meter { grid-column:2; } #rowR .vscale { grid-column:1; text-align:right; }
+    .vscale { display:block; grid-row:2; }
+    .meter > div { position:absolute; left:0; right:0; bottom:0; width:auto; height:calc(var(--lvl, 0) * 100%); background:linear-gradient(0deg, var(--ok) 0 70%, var(--warn) 85%, var(--rec)); background-size:100% var(--full, 100%); background-position:bottom; background-repeat:no-repeat; }
+    .meter .peak { top:auto; left:0; right:0; width:auto; height:3px; bottom:calc(var(--pk, 0) * 100% - 3px); }
+    .scale { display:none; }
+    .time { font-size:34px; margin:4px 0 0; }
+    .controls { flex-direction:row; justify-content:center; align-items:center; gap:20px; }
+    #monitor { width:auto; margin:0; }
+    .recwrap { margin:6px 0; }
+    #rec { width:92px; height:92px; font-size:16px; }
+    .box { margin:10px 0; }
+  }
   .small { font-size:13px; color:var(--dim); }
   a { color:var(--accent); }
 </style>
 </head>
 <body>
-<h1><span>WaveTagger Rec</span><button class="gear" id="gear" aria-label="設定">設定</button></h1>
+<h1><span>WaveTagger Rec</span><span class="hbtns"><button class="gear" id="orient" aria-label="画面の向き">向き: 自動</button><button class="gear" id="gear" aria-label="設定">設定</button></span></h1>
 
 <div class="meterbox" id="meterbox" title="タップでピーク・クリップ・Integrated をリセット">
-  <div class="mrow"><b id="labL">L</b><div class="meter" id="meterL"><div id="barL"></div><i class="peak" id="peakL"></i></div></div>
-  <div class="mrow" id="rowR"><b>R</b><div class="meter" id="meterR"><div id="barR"></div><i class="peak" id="peakR"></i></div></div>
+  <div class="mrow" id="rowL"><b id="labL">L</b><div class="meter" id="meterL"><div id="barL"></div><i class="peak" id="peakL"></i></div><div class="vscale"><span style="bottom:0%">-60</span><span style="bottom:33.3%">-40</span><span style="bottom:66.7%">-20</span><span style="bottom:83.3%">-10</span><span style="bottom:100%">0</span></div></div>
+  <div class="mrow" id="rowR"><b>R</b><div class="meter" id="meterR"><div id="barR"></div><i class="peak" id="peakR"></i></div><div class="vscale"><span style="bottom:0%">-60</span><span style="bottom:33.3%">-40</span><span style="bottom:66.7%">-20</span><span style="bottom:83.3%">-10</span><span style="bottom:100%">0</span></div></div>
   <div class="scale" style="margin-left:20px"><span style="left:0%;transform:none">-60</span><span style="left:33.3%">-40</span><span style="left:66.7%">-20</span><span style="left:83.3%">-10</span><span style="left:100%;transform:translateX(-100%)">0 dB</span></div>
   <div class="peaks"><span id="peaks">ピーク  L --  /  R --  dBFS</span><span class="clip hidden" id="clip">CLIP</span></div>
   <div class="lufs" id="lufs">
@@ -78,8 +105,11 @@
 </div>
 <div class="time" id="time">00:00</div>
 <div class="info" id="info">待機中</div>
-<button id="monitor">入力レベルを確認</button>
-<div class="recwrap"><button id="rec">録音</button></div>
+<div class="small" id="diag" style="text-align:center;word-break:break-all"></div>
+<div class="controls">
+  <button id="monitor">入力レベルを確認</button>
+  <div class="recwrap"><button id="rec">録音</button></div>
+</div>
 
 <div class="box" id="formatBox">
   <h2>録音フォーマット</h2>

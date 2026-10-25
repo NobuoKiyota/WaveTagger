@@ -200,6 +200,12 @@
     if (!meter) return;
 
     var pk = WavEnc.peaksOf(d);
+    if (channels === 2 && d.length >= 2 && !diag.checked && Math.max(pk[0], pk[1]) > 0.001) {
+      // left and right of a real stereo microphone are never sample for sample the same
+      var l = d[0], r = d[1];
+      for (var k = 0; k < l.length; k++) { var df = l[k] - r[k]; if (df < 0) df = -df; if (df > diag.maxDiff) diag.maxDiff = df; }
+      diag.loud += l.length / rate;
+    }
     for (var c = 0; c < pk.length && c < 2; c++) {
       if (pk[c] > peakNow[c]) peakNow[c] = pk[c];
       if (pk[c] > peakHold[c]) peakHold[c] = pk[c];
@@ -216,30 +222,78 @@
     return opening;
   }
 
+  // What the browser says about the microphone, what really arrived, and (for two channels) whether left and right are the same sound.
+  var diag = { label: '', reported: null, capMax: null, got: 0, how: '', maxDiff: 0, loud: 0, checked: false, dual: false };
+
+  function showDiag() {
+    var t = '入力: ' + (diag.label || '(名前なし)') + '  ·  ブラウザの報告: ' + (diag.reported === null ? 'なし' : diag.reported + ' ch')
+          + (diag.capMax !== null ? ' (最大 ' + diag.capMax + ')' : '') + '  ·  届いた音: ' + diag.got + ' ch'
+          + (diag.how ? '  ·  要求: ' + diag.how : '')
+          + (diag.dual ? '  ·  左右がまったく同じ音です (ステレオではありません)' : '');
+    $('diag').textContent = t;
+  }
+
+  function infoNow() {
+    if (recording) $('info').textContent = formatText(channels, rate, bits) + formatNote;
+    else if (monitoring) $('info').textContent = 'レベル確認中 (録音はしていません)  ' + formatText(channels, rate, bits) + formatNote;
+  }
+
+  // Stereo is asked for exactly first; a browser that cannot do that (OverconstrainedError) gets the softer request.
+  function getStream(wantStereo) {
+    var ask = function (count) {
+      return navigator.mediaDevices.getUserMedia({ audio: { channelCount: count, sampleRate: { ideal: format.rate }, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    };
+    if (!wantStereo) return ask({ ideal: 1 }).then(function (s) { diag.how = '1 ch'; return s; });
+    return ask({ exact: 2 }).then(function (s) { diag.how = '2 ch'; return s; }, function (e) {
+      if (e && (e.name === 'OverconstrainedError' || e.name === 'ConstraintNotSatisfiedError'))
+        return ask({ ideal: 2 }).then(function (s) { diag.how = '2 ch (できれば)'; return s; });
+      throw e;
+    });
+  }
+
   function openInputNow() {
     var wantStereo = format.channels === 'stereo';
-    var constraints = { audio: { channelCount: { ideal: wantStereo ? 2 : 1 }, sampleRate: { ideal: format.rate }, echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
-    return navigator.mediaDevices.getUserMedia(constraints).then(function (s) {
+    diag = { label: '', reported: null, capMax: null, got: 0, how: '', maxDiff: 0, loud: 0, checked: false, dual: false };
+
+    return getStream(wantStereo).then(function (s) {
       stream = s;
+      var track = s.getAudioTracks()[0];
+      diag.label = track.label || '';
+      var st = track.getSettings ? track.getSettings() : {};
+      diag.reported = st.channelCount === undefined ? null : st.channelCount;
+      var caps = track.getCapabilities ? track.getCapabilities() : null;
+      diag.capMax = caps && caps.channelCount ? caps.channelCount.max : null;
       ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: format.rate });
       rate = ctx.sampleRate;
       return ctx.audioWorklet.addModule('worklet.js');
     }).then(function () {
       source = ctx.createMediaStreamSource(stream);
-      var have = (stream.getAudioTracks()[0].getSettings().channelCount) || 1;
-      // stereo only if the microphone really gives two channels; mono is always one (a two-channel input is mixed down by the browser)
-      channels = wantStereo ? Math.min(2, Math.max(1, have)) : 1;
+      // 'max': the node takes as many channels as the input really has, so the first block of sound says how many there are
+      // (the browser's own report is not always there, and a missing value must not be taken for "one channel")
+      node = new AudioWorkletNode(ctx, 'recorder', { channelCount: 2, channelCountMode: 'max', numberOfOutputs: 0 });
+      source.connect(node);
+      return new Promise(function (resolve) {
+        var done = false;
+        var finish = function (n) { if (!done) { done = true; node.port.onmessage = null; resolve(n); } };
+        node.port.onmessage = function (e) { if (Array.isArray(e.data)) finish(e.data.length); };
+        setTimeout(function () { finish(diag.reported || 1); }, 1500);
+      });
+    }).then(function (got) {
+      diag.got = got;
+      // stereo only if two channels really arrive; mono is always one (a wider input is mixed down by the browser, never the other way round)
+      channels = wantStereo ? (got >= 2 ? 2 : 1) : 1;
+      node.channelCountMode = 'explicit';
+      node.channelCount = channels;
       bits = format.bits;
-      formatNote = (wantStereo && channels === 1 ? ' (この端末のマイクは 1 チャンネルなので、モノラルになります)' : '')
+      formatNote = (wantStereo && channels === 1 ? ' (ブラウザがこのマイクを 1 チャンネルでしか渡さないため、モノラルです)' : '')
                    + (rate !== format.rate ? ' (端末が ' + format.rate + ' Hz に対応していません)' : '');
 
       meter = Loudness.createMeter(rate, channels);
       showChannels(channels);
       resetReadout();
       chunks = [];
-      node = new AudioWorkletNode(ctx, 'recorder', { channelCount: channels, channelCountMode: 'explicit', numberOfOutputs: 0 });
       node.port.onmessage = onBlock;
-      source.connect(node);
+      showDiag();
       wakeOn();
       tick();
       timer = setInterval(tick, 100);
@@ -266,9 +320,10 @@
   function showIdle() {
     showChannels(format.channels === 'stereo' ? 2 : 1);
     ['L', 'R'].forEach(function (c) {
-      $('bar' + c).style.width = '0%';
-      $('peak' + c).style.left = '0%';
-      $('meter' + c).classList.remove('hot');
+      var m = $('meter' + c);
+      m.style.setProperty('--lvl', '0');
+      m.style.setProperty('--pk', '0');
+      m.classList.remove('hot');
     });
     $('time').textContent = '00:00';
     ['lm', 'ls', 'li'].forEach(function (id) { $('lufs').querySelector('[data-k="' + id + '"]').textContent = '--'; });
@@ -361,15 +416,23 @@
       var level = peakNow[ch];
       var db = level > 0 ? 20 * Math.log10(level) : -120;
       var pos = Math.max(0, Math.min(1, (db + 60) / 60));
-      $('bar' + c).style.width = (pos * 100) + '%';
-      $('bar' + c).style.setProperty('--full', (100 / Math.max(pos, 0.01)) + '%');
+      var m = $('meter' + c);
       if (pos >= peakPos[ch]) { peakPos[ch] = pos; peakAt[ch] = Date.now(); }
       else if (Date.now() - peakAt[ch] > 1500) peakPos[ch] = Math.max(pos, peakPos[ch] - 0.02);
-      $('peak' + c).style.left = 'calc(' + (peakPos[ch] * 100) + '% - 3px)';
-      $('meter' + c).classList.toggle('hot', level > 0.97);
+      m.style.setProperty('--lvl', pos);
+      m.style.setProperty('--full', (100 / Math.max(pos, 0.01)) + '%');
+      m.style.setProperty('--pk', peakPos[ch]);
+      m.classList.toggle('hot', level > 0.97);
     });
     peakNow = [peakNow[0] * 0.8, peakNow[1] * 0.8];
 
+    if (channels === 2 && !diag.checked && diag.loud >= 1) {
+      diag.checked = true;
+      diag.dual = diag.maxDiff < 1e-6;
+      if (diag.dual) formatNote += ' (左右がまったく同じ音です)';
+      showDiag();
+      infoNow();
+    }
     if (meter) {
       var set = function (k, v) { $('lufs').querySelector('[data-k="' + k + '"]').textContent = fmtDb(v); };
       set('lm', meter.momentary());
@@ -402,6 +465,61 @@
       $('retry').classList.toggle('hidden', waiting === 0);
     });
   }
+
+  // ---- screen orientation: auto -> landscape -> portrait. The phone turns the screen by itself when it is tilted; this holds it.
+  var ORIENT_KEY = 'wtrec.orientation';
+  var ORIENT_TEXT = { auto: '向き: 自動', landscape: '向き: 横', portrait: '向き: 縦' };
+  var orient = 'auto', enteredFullscreen = false;
+  try { var savedOrient = localStorage.getItem(ORIENT_KEY); if (savedOrient === 'landscape' || savedOrient === 'portrait') orient = savedOrient; } catch (e) { /* ignore */ }
+
+  function showOrient() {
+    $('orient').textContent = ORIENT_TEXT[orient];
+    $('orient').classList.toggle('on', orient !== 'auto');
+  }
+
+  // Chrome on Android only locks the orientation in full screen (or in some installed apps), so if the plain lock is refused the page goes
+  // full screen first (that needs this tap). iPhones cannot lock at all.
+  function lockOrientation(mode) {
+    var so = window.screen && screen.orientation;
+    if (mode === 'auto') {
+      if (so && so.unlock) { try { so.unlock(); } catch (e) { /* nothing was locked */ } }
+      if (enteredFullscreen && document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(function () {});
+      enteredFullscreen = false;
+      return Promise.resolve();
+    }
+    var cannot = new Error('この端末 (ブラウザ) では向きを固定できません。本体の「画面の自動回転」をオフにしてから、本体を傾けてください');
+    if (!so || !so.lock) return Promise.reject(cannot);
+    var want = mode === 'landscape' ? 'landscape' : 'portrait';
+    return Promise.resolve().then(function () { return so.lock(want); }).catch(function () {
+      var el = document.documentElement;
+      if (!el.requestFullscreen || document.fullscreenElement) throw cannot;
+      return el.requestFullscreen({ navigationUI: 'hide' }).then(function () { enteredFullscreen = true; return so.lock(want); });
+    }).catch(function () { throw cannot; });
+  }
+
+  function setOrientation(mode) {
+    return lockOrientation(mode).then(function () {
+      orient = mode;
+      try { localStorage.setItem(ORIENT_KEY, orient); } catch (e) { /* private mode */ }
+      showOrient();
+    }, function (e) {
+      orient = 'auto';
+      showOrient();
+      $('info').textContent = e.message;
+    });
+  }
+
+  $('orient').addEventListener('click', function () {
+    setOrientation(orient === 'auto' ? 'landscape' : orient === 'landscape' ? 'portrait' : 'auto');
+  });
+  // leaving full screen (the back gesture) releases the lock
+  document.addEventListener('fullscreenchange', function () {
+    if (!document.fullscreenElement && enteredFullscreen) { enteredFullscreen = false; orient = 'auto'; showOrient(); }
+  });
+  // a saved choice is applied with the first tap (full screen cannot be entered without one)
+  document.addEventListener('click', function (ev) {
+    if (orient !== 'auto' && !(ev.target.closest && ev.target.closest('#orient'))) setOrientation(orient);
+  }, { once: true, capture: true });
 
   $('rec').addEventListener('click', function () {
     var p = recording ? stopRecording() : startRecording();
@@ -482,6 +600,7 @@
   showAuth();
   renderList();
   showFormat();
+  showOrient();
   showIdle();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
 })();
