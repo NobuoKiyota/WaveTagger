@@ -97,8 +97,19 @@
     });
   }
 
+  var waitingCount = 0; // recordings that are not in Drive yet
+
   function showAuth() {
     $('auth').textContent = tokenValid() ? '接続済み (約 1 時間有効)' : '未接続';
+    showConnect();
+  }
+
+  // Recordings are never held up by a sign-in: they wait, and this bar offers to connect when it suits the user.
+  function showConnect() {
+    var s = loadSettings();
+    var need = waitingCount > 0 && !tokenValid() && !!s.clientId && !!folderIdOf(s.folder);
+    $('connectBar').classList.toggle('hidden', !need);
+    if (need) $('connectText').textContent = '送信待ちが ' + waitingCount + ' 件あります。Google に接続すると送信します (接続は約 1 時間有効)';
   }
 
   // ---------------------------------------------------------------- upload (resumable, one request per file)
@@ -158,6 +169,7 @@
   var meter = null;                    // loudness (Loudness.createMeter)
   var peakNow = [0, 0], peakHold = [0, 0], clipped = false, peakPos = [0, 0], peakAt = [0, 0];
   var formatNote = '';
+  var recPeak = 0, badSamples = 0; // the loudest sample of this recording; numbers that were not numbers
 
   // the format the user chose (kept on this phone)
   var FORMAT_KEY = 'wtrec.format';
@@ -196,10 +208,12 @@
     var d = e.data;
     if (d === 'flushed') { if (flushDone) flushDone(); return; }
     if (!Array.isArray(d)) return;
+    badSamples += WavEnc.sanitize(d);
     if (recording || flushing) chunks.push(d);
     if (!meter) return;
 
     var pk = WavEnc.peaksOf(d);
+    if (recording || flushing) recPeak = Math.max(recPeak, pk[0] || 0, pk[1] || 0);
     if (channels === 2 && d.length >= 2 && !diag.checked && Math.max(pk[0], pk[1]) > 0.001) {
       // left and right of a real stereo microphone are never sample for sample the same
       var l = d[0], r = d[1];
@@ -229,7 +243,8 @@
     var t = '入力: ' + (diag.label || '(名前なし)') + '  ·  ブラウザの報告: ' + (diag.reported === null ? 'なし' : diag.reported + ' ch')
           + (diag.capMax !== null ? ' (最大 ' + diag.capMax + ')' : '') + '  ·  届いた音: ' + diag.got + ' ch'
           + (diag.how ? '  ·  要求: ' + diag.how : '')
-          + (diag.dual ? '  ·  左右がまったく同じ音です (ステレオではありません)' : '');
+          + (diag.dual ? '  ·  左右がまったく同じ音です (ステレオではありません)' : '')
+          + (badSamples ? '  ·  数値でない値を ' + badSamples + ' 個受け取りました' : '');
     $('diag').textContent = t;
   }
 
@@ -364,6 +379,7 @@
     return openInput().then(function () {
       meter.reset();                    // the integrated loudness is that of this recording
       peakHold = [0, 0]; clipped = false;
+      recPeak = 0; badSamples = 0;
       chunks = [];
       recording = true;
       monitoring = false;
@@ -383,9 +399,6 @@
     $('rec').textContent = '録音';
     $('info').textContent = '保存中...';
 
-    // the pop-up has to open from this tap, so ask for the token right now if there is none
-    var auth = tokenValid() ? Promise.resolve() : requestToken().catch(function () { /* the file waits for a later tap */ });
-
     return new Promise(function (resolve) {
       var done = false;
       var finish = function () { if (!done) { done = true; flushing = false; flushDone = null; resolve(); } };
@@ -394,6 +407,16 @@
       node.port.postMessage('flush');
       setTimeout(finish, 500);
     }).then(function () {
+      // a recording in which nothing but zeros arrived is of no use: say so instead of saving and sending an empty file
+      if (!(recPeak > 1e-6)) {
+        chunks = [];
+        showDiag();
+        closeInput();
+        setBusy();
+        $('info').textContent = '録音が無音でした (マイクの音が届いていません)。保存しません。もう一度「入力レベルを確認」でメーターが動くか見てください';
+        return;
+      }
+
       var fmt = { channels: channels, rate: rate, bits: bits };
       var enc = WavEnc.encodeWav(chunks, fmt.channels, fmt.rate, fmt.bits);
       chunks = [];
@@ -403,8 +426,9 @@
       var blob = new Blob(enc.parts, { type: 'audio/wav' });
       var name = stamp(new Date(startedAt)) + '.wav';
       return putRec({ id: name, name: name, blob: blob, size: blob.size, status: 'wait', error: '', createdAt: startedAt, seconds: enc.frames / fmt.rate, format: fmt })
-        .then(function () { $('info').textContent = '保存しました: ' + name; return renderList(); });
-    }).then(function () { return auth; }).then(function () { return uploadPending(); });
+        .then(function () { $('info').textContent = '保存しました: ' + name + (tokenValid() ? '' : '  (Google に未接続: 送信待ちです)'); return renderList(); })
+        .then(function () { return tokenValid() ? uploadPending() : undefined; }); // no sign-in window here: that waits for the user
+    });
   }
 
   // 10 times a second: the time, the level meter (peak, with a hold) and the loudness figures
@@ -463,14 +487,19 @@
         li.appendChild(a); li.appendChild(b); ul.appendChild(li);
       });
       $('retry').classList.toggle('hidden', waiting === 0);
+      waitingCount = waiting;
+      showConnect();
     });
   }
 
   // ---- screen orientation: auto -> landscape -> portrait. The phone turns the screen by itself when it is tilted; this holds it.
   var ORIENT_KEY = 'wtrec.orientation';
   var ORIENT_TEXT = { auto: '向き: 自動', landscape: '向き: 横', portrait: '向き: 縦' };
-  var orient = 'auto', enteredFullscreen = false;
-  try { var savedOrient = localStorage.getItem(ORIENT_KEY); if (savedOrient === 'landscape' || savedOrient === 'portrait') orient = savedOrient; } catch (e) { /* ignore */ }
+  var orient = 'landscape', orientChosen = false, enteredFullscreen = false; // landscape until the user chooses otherwise
+  try {
+    var savedOrient = localStorage.getItem(ORIENT_KEY);
+    if (savedOrient === 'auto' || savedOrient === 'landscape' || savedOrient === 'portrait') { orient = savedOrient; orientChosen = true; }
+  } catch (e) { /* ignore */ }
 
   function showOrient() {
     $('orient').textContent = ORIENT_TEXT[orient];
@@ -497,15 +526,17 @@
     }).catch(function () { throw cannot; });
   }
 
-  function setOrientation(mode) {
+  // quiet: the default is applied on its own; a phone that cannot lock the screen is not told about it every time
+  function setOrientation(mode, quiet) {
     return lockOrientation(mode).then(function () {
       orient = mode;
-      try { localStorage.setItem(ORIENT_KEY, orient); } catch (e) { /* private mode */ }
+      if (!quiet) orientChosen = true;
+      if (!quiet) { try { localStorage.setItem(ORIENT_KEY, orient); } catch (e) { /* private mode */ } }
       showOrient();
     }, function (e) {
       orient = 'auto';
       showOrient();
-      $('info').textContent = e.message;
+      if (!quiet) $('info').textContent = e.message;
     });
   }
 
@@ -518,7 +549,7 @@
   });
   // a saved choice is applied with the first tap (full screen cannot be entered without one)
   document.addEventListener('click', function (ev) {
-    if (orient !== 'auto' && !(ev.target.closest && ev.target.closest('#orient'))) setOrientation(orient);
+    if (orient !== 'auto' && !(ev.target.closest && ev.target.closest('#orient'))) setOrientation(orient, !orientChosen);
   }, { once: true, capture: true });
 
   $('rec').addEventListener('click', function () {
@@ -561,7 +592,15 @@
       }
     });
   });
-  $('gear').addEventListener('click', function () { $('settings').classList.toggle('hidden'); });
+  $('gear').addEventListener('click', function () {
+    var box = $('settings');
+    box.classList.toggle('hidden');
+    var open = !box.classList.contains('hidden');
+    $('gear').classList.toggle('on', open);
+    if (open) box.scrollIntoView({ behavior: 'smooth', block: 'start' }); // it opens below the buttons: without this it looks as if nothing happened
+  });
+  $('connectNow').addEventListener('click', function () { $('retry').click(); });
+  setInterval(showAuth, 30000); // the token runs out after about an hour: the bar appears by itself
   $('save').addEventListener('click', function () {
     saveSettings({ clientId: $('clientId').value.trim(), folder: folderIdOf($('folder').value) });
     $('info').textContent = '設定を保存しました';
@@ -595,7 +634,7 @@
   var s0 = loadSettings();
   $('clientId').value = s0.clientId || '';
   $('folder').value = s0.folder || '';
-  if (!s0.clientId || !s0.folder) $('settings').classList.remove('hidden');
+  if (!s0.clientId || !s0.folder) { $('settings').classList.remove('hidden'); $('gear').classList.add('on'); }
   else $('settings').classList.add('hidden');
   showAuth();
   renderList();

@@ -1,6 +1,6 @@
 // node Tools/test_wav.js : checks the browser recorder's WAV writer against an independent parse
 const assert = require('assert');
-const { encodeWav, encodeWav24, peakOf, peaksOf } = require('../docs/wav.js');
+const { encodeWav, encodeWav24, peakOf, peaksOf, sanitize } = require('../docs/wav.js');
 
 const L = Float32Array.from([0, 0.5, -0.5, 1, -1, 2, -2]);
 const R = Float32Array.from([0.25, -0.25, 0, 0.999999, -0.999999, 0.1, -0.1]);
@@ -70,6 +70,20 @@ assert.strictEqual(peakOf([L, R]), 2);
   assert.strictEqual(e24.readUInt16LE(34), 24);
   assert.strictEqual(e24.readIntLE(44 + 3, 3), Math.round(0.5 * 8388607));
   assert.deepStrictEqual(peaksOf([L, R]), [2, Math.fround(0.999999)]);
+}
+
+
+// a non-number is replaced and counted (otherwise the encoder writes zeros and nobody notices)
+{
+  const block = [Float32Array.from([0.5, NaN, -0.25, Infinity]), Float32Array.from([-Infinity, 0.1, NaN, NaN])];
+  assert.strictEqual(sanitize(block), 5, 'five bad samples');
+  assert.deepStrictEqual(Array.from(block[0]), [0.5, 0, -0.25, 0]);
+  assert.deepStrictEqual(Array.from(block[1]), [0, Math.fround(0.1), 0, 0]);
+  assert.strictEqual(sanitize(block), 0, 'nothing left to replace');
+  // a block that is all NaN would have encoded to pure zeros: now it is pure silence and is reported as such by the peak
+  const nan = [new Float32Array(64).fill(NaN)];
+  assert.strictEqual(sanitize(nan), 64);
+  assert.strictEqual(peakOf(nan), 0);
 }
 
 console.log('wav encoder: all checks passed');

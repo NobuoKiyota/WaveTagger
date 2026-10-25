@@ -74,7 +74,17 @@
     return out;
   }
 
-  var api = { encodeWav: encodeWav, encodeWav24: encodeWav24, peakOf: peakOf, peaksOf: peaksOf };
+  // NaN / Infinity in a block (a misbehaving input) would be written as zeros without a trace: replace them by 0, in place, and say how many there were.
+  function sanitize(block) {
+    var bad = 0;
+    for (var ch = 0; ch < block.length; ch++) {
+      var a = block[ch];
+      for (var i = 0; i < a.length; i++) { var v = a[i]; if (v !== v || v === Infinity || v === -Infinity) { a[i] = 0; bad++; } }
+    }
+    return bad;
+  }
+
+  var api = { encodeWav: encodeWav, encodeWav24: encodeWav24, peakOf: peakOf, peaksOf: peaksOf, sanitize: sanitize };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.WavEnc = api;
 })(typeof self !== 'undefined' ? self : this);
