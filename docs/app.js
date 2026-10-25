@@ -171,6 +171,14 @@
   var formatNote = '';
   var recPeak = 0, badSamples = 0; // the loudest sample of this recording; numbers that were not numbers
 
+  // stereo scope (Polar Sample / Lissajous): drawn every frame while the microphone is open
+  var SCOPE_KEY = 'wtrec.scope';
+  var scope = Scope.create($('scope')), scopeRaf = 0;
+  try { scope.setMode(localStorage.getItem(SCOPE_KEY)); } catch (e) { /* ignore */ }
+  function scopeLoop() { scope.draw(); scopeRaf = requestAnimationFrame(scopeLoop); }
+  function scopeStart() { if (!scopeRaf) scopeRaf = requestAnimationFrame(scopeLoop); }
+  function scopeStop() { if (scopeRaf) cancelAnimationFrame(scopeRaf); scopeRaf = 0; }
+
   // the format the user chose (kept on this phone)
   var FORMAT_KEY = 'wtrec.format';
   function loadFormat() {
@@ -211,6 +219,7 @@
     badSamples += WavEnc.sanitize(d);
     if (recording || flushing) chunks.push(d);
     if (!meter) return;
+    if (channels === 2 && d.length >= 2) scope.push(d, rate);
 
     var pk = WavEnc.peaksOf(d);
     if (recording || flushing) recPeak = Math.max(recPeak, pk[0] || 0, pk[1] || 0);
@@ -310,6 +319,8 @@
       node.port.onmessage = onBlock;
       showDiag();
       wakeOn();
+      scope.clear();
+      scopeStart();
       tick();
       timer = setInterval(tick, 100);
     }).catch(function (e) {
@@ -321,6 +332,7 @@
   function closeInput() {
     clearInterval(timer);
     timer = null;
+    scopeStop();
     if (node) node.port.onmessage = null;
     try { if (source) source.disconnect(); } catch (e) { /* already gone */ }
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
@@ -347,12 +359,23 @@
     $('monitor').textContent = '入力レベルを確認';
     $('monitor').classList.remove('on');
     peakPos = [0, 0];
+    scope.clear();
+    showCorr(null);
   }
 
-  // stereo: two bars (L and R); mono: one
+  // stereo: two bars (L and R), the scope and the correlation; mono: one bar
   function showChannels(n) {
     $('rowR').classList.toggle('hidden', n !== 2);
     $('labL').textContent = n === 2 ? 'L' : 'M';
+    $('scopebox').classList.toggle('hidden', n !== 2);
+    $('corr').classList.toggle('hidden', n !== 2);
+    scope.relayout();
+  }
+
+  function showCorr(v) {
+    $('corrNum').textContent = v === null ? '--' : (v >= 0 ? '+' : '') + v.toFixed(2);
+    $('corrMark').style.setProperty('--c', v === null ? 0.5 : (v + 1) / 2);
+    $('corrMark').classList.toggle('neg', v !== null && v < -0.2);
   }
 
   function setBusy() {
@@ -463,6 +486,7 @@
       set('ls', meter.shortTerm());
       set('li', meter.integrated());
     }
+    if (channels === 2 && stream) showCorr(scope.correlation());
     $('peaks').textContent = 'ピーク  L ' + fmtDb(dbOf(peakHold[0])) + (channels === 2 ? '  /  R ' + fmtDb(dbOf(peakHold[1])) : '') + '  dBFS';
     $('clip').classList.toggle('hidden', !clipped);
   }
@@ -562,7 +586,17 @@
     p.catch(function (e) { $('info').textContent = 'エラー: ' + (e && e.message ? e.message : e); });
   });
   // tap the meter: peak hold, the clip mark and the integrated loudness start over
-  $('meterbox').addEventListener('click', function () { resetReadout(); tick(); });
+  ['meterbox', 'peaksRow', 'lufs'].forEach(function (id) {
+    $(id).addEventListener('click', function () { resetReadout(); tick(); });
+  });
+  // tap the scope: Polar Sample <-> Lissajous
+  $('scopebox').addEventListener('click', function () {
+    var m = scope.mode() === 'polar' ? 'lissajous' : 'polar';
+    scope.setMode(m);
+    try { localStorage.setItem(SCOPE_KEY, m); } catch (e) { /* private mode */ }
+  });
+  if (window.ResizeObserver) new ResizeObserver(function () { scope.relayout(); }).observe($('scopebox'));
+  window.addEventListener('resize', function () { scope.relayout(); });
 
   // format: stereo / mono, 48 / 44.1 kHz, 24 / 16 bit (not while recording; a running level check is restarted with the new format)
   function showFormat() {
@@ -592,12 +626,17 @@
       }
     });
   });
-  $('gear').addEventListener('click', function () {
-    var box = $('settings');
-    box.classList.toggle('hidden');
-    var open = !box.classList.contains('hidden');
-    $('gear').classList.toggle('on', open);
-    if (open) box.scrollIntoView({ behavior: 'smooth', block: 'start' }); // it opens below the buttons: without this it looks as if nothing happened
+  // tabs: the recording screen holds only what is needed while recording; the format, the Drive settings and the history have their own tabs
+  function showTab(name) {
+    ['Rec', 'Hist', 'Set'].forEach(function (t) {
+      $('tab' + t).classList.toggle('on', t === name);
+      $('tabs').querySelector('[data-tab="' + t + '"]').classList.toggle('on', t === name);
+    });
+    if (name === 'Rec') scope.relayout();
+  }
+  $('tabs').addEventListener('click', function (ev) {
+    var b = ev.target.closest('button');
+    if (b) showTab(b.getAttribute('data-tab'));
   });
   $('connectNow').addEventListener('click', function () { $('retry').click(); });
   setInterval(showAuth, 30000); // the token runs out after about an hour: the bar appears by itself
@@ -634,8 +673,7 @@
   var s0 = loadSettings();
   $('clientId').value = s0.clientId || '';
   $('folder').value = s0.folder || '';
-  if (!s0.clientId || !s0.folder) { $('settings').classList.remove('hidden'); $('gear').classList.add('on'); }
-  else $('settings').classList.add('hidden');
+  if (!s0.clientId || !s0.folder) showTab('Set'); // nothing to send to yet: start at the settings
   showAuth();
   renderList();
   showFormat();

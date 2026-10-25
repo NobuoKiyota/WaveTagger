@@ -11,65 +11,97 @@
   :root { --bg:#14161a; --panel:#1d2026; --line:#2c313a; --text:#e8eaed; --dim:#8b929c; --rec:#e5484d; --ok:#46c28a; --warn:#e0b84f; --accent:#4c8dff; }
   * { box-sizing: border-box; }
   html, body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, "Noto Sans JP", sans-serif; }
-  body { min-height:100dvh; padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); max-width:520px; margin:0 auto; }
-  h1 { font-size:18px; margin:0 0 12px; display:flex; justify-content:space-between; align-items:center; }
-  .hbtns { display:flex; gap:6px; }
-  .gear.on { border-color:var(--accent); color:var(--accent); }
+  /* the page is as tall as the screen: the recording tab fits in it (nothing to scroll), the other tabs scroll inside themselves */
+  body { height:100dvh; display:flex; flex-direction:column; padding:10px 16px; padding-bottom:calc(10px + env(safe-area-inset-bottom)); max-width:520px; margin:0 auto; overflow:hidden; }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; margin-bottom:6px; }
+  header .title { flex:1; font-size:18px; font-weight:600; white-space:nowrap; }
+  .tabs { display:flex; gap:4px; order:3; width:100%; }
+  .tabs button { flex:1; padding:6px 4px; }
+  .tabs button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
   button { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
   button:active { filter:brightness(1.3); }
+  button:disabled { opacity:.45; }
   .gear { padding:6px 10px; }
-  .meterbox { position:relative; margin-top:4px; }
+  .gear.on { border-color:var(--accent); color:var(--accent); }
+
+  .tab { display:none; flex:1; min-height:0; overflow:auto; }
+  .tab.on { display:block; }
+  #tabRec.on { display:flex; flex-direction:column; }
+
+  /* level meters */
+  .meterbox { position:relative; margin-top:2px; cursor:pointer; }
   .meter { position:relative; height:26px; background:var(--panel); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
   .meter > div { height:100%; width:calc(var(--lvl, 0) * 100%); background:linear-gradient(90deg, var(--ok) 0 70%, var(--warn) 85%, var(--rec)); background-size:var(--full, 100%) 100%; background-repeat:no-repeat; }
   .meter .peak { position:absolute; top:0; bottom:0; width:3px; background:#fff; opacity:.85; left:calc(var(--pk, 0) * 100% - 3px); }
   .meter.hot { border-color:var(--rec); }
-  .mrow { display:flex; align-items:center; gap:6px; margin-top:4px; }
+  .mrow { display:flex; align-items:center; gap:6px; margin-top:3px; }
   .mrow:first-child { margin-top:0; }
   .mrow b { width:14px; font-size:12px; color:var(--dim); text-align:center; font-weight:600; }
-  .mrow .meter { flex:1; height:20px; }
-  .scale { position:relative; height:16px; font-size:11px; color:var(--dim); }
-  .meterbox { cursor:pointer; }
-  .lufs { display:flex; justify-content:space-between; gap:6px; margin-top:8px; text-align:center; font-variant-numeric:tabular-nums; }
-  .lufs div { flex:1; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:4px 2px; }
-  .lufs b { display:block; font-size:20px; font-weight:600; }
-  .lufs small { color:var(--dim); font-size:11px; }
-  .peaks { display:flex; justify-content:space-between; align-items:center; margin-top:6px; font-size:13px; color:var(--dim); font-variant-numeric:tabular-nums; }
-  .clip { color:#fff; background:var(--rec); border-radius:6px; padding:0 8px; font-weight:700; }
-  .seg { display:flex; gap:6px; margin:6px 0 10px; }
-  .seg button { flex:1; padding:9px 4px; }
-  .seg button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .seg.disabled { opacity:.45; pointer-events:none; }
-  .controls { display:flex; flex-direction:column; }
+  .mrow .meter { flex:1; height:18px; }
+  .mrow.hidden { display:none; }
+  .scale { position:relative; height:14px; font-size:11px; color:var(--dim); margin-left:20px; }
+  .scale span { position:absolute; transform:translateX(-50%); }
   .vscale { display:none; position:relative; font-size:10px; color:var(--dim); }
   .vscale span { position:absolute; left:0; right:0; transform:translateY(50%); line-height:1; }
-  #monitor { width:100%; margin-top:12px; }
+
+  /* the recording tab: peaks, loudness, scope, correlation, time, info, buttons (one column; two in landscape) */
+  .recgrid { display:flex; flex-direction:column; flex:1; min-height:0; }
+  .colA, .colB { display:contents; }
+  .peaks { order:1; display:flex; justify-content:space-between; align-items:center; font-size:13px; color:var(--dim); font-variant-numeric:tabular-nums; cursor:pointer; }
+  .clip { color:#fff; background:var(--rec); border-radius:6px; padding:0 8px; font-weight:700; }
+  .lufs { order:2; display:flex; justify-content:space-between; gap:6px; margin-top:4px; text-align:center; font-variant-numeric:tabular-nums; cursor:pointer; }
+  .lufs div { flex:1; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:2px 2px; line-height:1.25; }
+  .lufs b { display:block; font-size:19px; font-weight:600; }
+  .lufs small { color:var(--dim); font-size:10px; }
+  .scopebox { order:3; flex:1 1 90px; min-height:90px; position:relative; margin-top:6px; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; cursor:pointer; }
+  .scopebox canvas { position:absolute; left:0; top:0; width:100%; height:100%; display:block; }
+  .scopebox.hidden, .corr.hidden { display:none; }
+  .corr { order:4; display:flex; align-items:center; gap:8px; margin-top:4px; font-size:12px; color:var(--dim); }
+  .corr .track { position:relative; flex:1; height:8px; background:var(--panel); border:1px solid var(--line); border-radius:4px; }
+  .corr .track::before { content:''; position:absolute; left:50%; top:-3px; bottom:-3px; width:1px; background:var(--line); }
+  .corr .track i { position:absolute; top:-3px; bottom:-3px; width:4px; border-radius:2px; background:#fff; left:calc(var(--c, .5) * 100% - 2px); }
+  .corr .track i.neg { background:var(--rec); }
+  .corr b { min-width:42px; text-align:right; color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+  .time { order:5; font-size:36px; line-height:1.15; font-variant-numeric:tabular-nums; text-align:center; margin-top:6px; }
+  .info { order:6; text-align:center; color:var(--dim); font-size:13px; line-height:1.35; min-height:1.35em; max-height:4em; overflow:auto; }
+  .controls { order:7; display:flex; flex-direction:row; align-items:center; gap:14px; margin-top:6px; }
+  #monitor { flex:1; margin:0; }
   #monitor.on { border-color:var(--ok); color:var(--ok); }
-  button:disabled { opacity:.45; }
-  .scale span { position:absolute; transform:translateX(-50%); }
-  .time { font-size:44px; font-variant-numeric:tabular-nums; text-align:center; margin:18px 0 6px; }
-  .info { text-align:center; color:var(--dim); min-height:1.5em; }
-  .recwrap { display:flex; justify-content:center; margin:22px 0; }
-  #rec { width:132px; height:132px; border-radius:50%; background:var(--rec); border:6px solid #fff3; font-size:18px; font-weight:700; color:#fff; }
-  #rec.on { border-radius:26px; animation:pulse 1.2s infinite; }
+  .recwrap { display:flex; justify-content:center; }
+  #rec { width:96px; height:96px; border-radius:50%; background:var(--rec); border:5px solid #fff3; font-size:17px; font-weight:700; color:#fff; padding:0; }
+  #rec.on { border-radius:22px; animation:pulse 1.2s infinite; }
   @keyframes pulse { 50% { filter:brightness(1.25); } }
-  .box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; margin:14px 0; }
+
+  .box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; margin:0 0 12px; }
   .box h2 { font-size:14px; color:var(--dim); margin:0 0 8px; font-weight:600; }
   label { display:block; color:var(--dim); font-size:13px; margin:10px 0 4px; }
   input[type=text] { width:100%; font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:9px; }
   .row { display:flex; gap:8px; align-items:center; }
+  .seg { display:flex; gap:6px; margin:6px 0 10px; }
+  .seg button { flex:1; padding:9px 4px; }
+  .seg button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .seg.disabled { opacity:.45; pointer-events:none; }
   ul { list-style:none; margin:0; padding:0; }
   li { display:flex; justify-content:space-between; gap:8px; padding:8px 0; border-top:1px solid var(--line); font-size:14px; }
   li:first-child { border-top:0; }
   .st-done { color:var(--ok); } .st-wait { color:var(--warn); } .st-fail { color:var(--rec); }
   .hidden { display:none; }
-  .mrow.hidden { display:none; } /* (more specific than .mrow in the landscape layout: the right meter of a mono recording stays away) */
-  .warnbox { border-color:var(--warn); display:flex; gap:10px; align-items:center; justify-content:space-between; margin:8px 0; }
+  .warnbox { border-color:var(--warn); display:flex; gap:10px; align-items:center; justify-content:space-between; margin:4px 0; padding:8px 10px; }
+  .warnbox.hidden { display:none; }
   .warnbox .small { margin:0; }
+  .small { font-size:13px; color:var(--dim); }
+  a { color:var(--accent); }
+
+  /* landscape phone: the L meter at the left edge, the R meter at the right edge (tall); scope and loudness on the left, time and buttons on the right */
   @media (orientation: landscape) and (max-height: 560px) {
-    body { max-width:none; padding:8px 92px; padding-left:calc(92px + env(safe-area-inset-left)); padding-right:calc(92px + env(safe-area-inset-right)); }
-    h1 { margin-bottom:6px; }
+    body { max-width:none; padding:6px 92px; padding-left:calc(92px + env(safe-area-inset-left)); padding-right:calc(92px + env(safe-area-inset-right)); padding-bottom:calc(6px + env(safe-area-inset-bottom)); }
+    header { flex-wrap:nowrap; margin-bottom:4px; }
+    header .title { font-size:16px; }
+    .tabs { order:0; width:auto; }
+    .tabs button { flex:none; padding:4px 14px; }
     .mrow { position:fixed; top:8px; bottom:calc(8px + env(safe-area-inset-bottom)); width:76px; margin:0; display:grid; grid-template-rows:auto 1fr; row-gap:4px; align-items:stretch; z-index:5; }
     .mrow:first-child { margin:0; }
+    .mrow.hidden { display:none; }
     #rowL { left:calc(8px + env(safe-area-inset-left)); grid-template-columns:1fr 26px; }
     #rowR { right:calc(8px + env(safe-area-inset-right)); grid-template-columns:26px 1fr; }
     .mrow b { grid-column:1 / -1; grid-row:1; width:auto; font-size:14px; }
@@ -80,72 +112,103 @@
     .meter > div { position:absolute; left:0; right:0; bottom:0; width:auto; height:calc(var(--lvl, 0) * 100%); background:linear-gradient(0deg, var(--ok) 0 70%, var(--warn) 85%, var(--rec)); background-size:100% var(--full, 100%); background-position:bottom; background-repeat:no-repeat; }
     .meter .peak { top:auto; left:0; right:0; width:auto; height:3px; bottom:calc(var(--pk, 0) * 100% - 3px); }
     .scale { display:none; }
-    .time { font-size:34px; margin:4px 0 0; }
-    .controls { flex-direction:row; justify-content:center; align-items:center; gap:20px; }
-    #monitor { width:auto; margin:0; }
-    .recwrap { margin:6px 0; }
-    #rec { width:92px; height:92px; font-size:16px; }
-    .box { margin:10px 0; }
+    .meterbox { margin:0; }
+
+    .recgrid { display:grid; grid-template-columns:minmax(0, 1.15fr) minmax(0, 1fr); column-gap:14px; }
+    .colA, .colB { display:flex; flex-direction:column; min-height:0; }
+    .colB { justify-content:center; }
+    .peaks, .lufs, .scopebox, .corr, .time, .info, .controls { order:0; }
+    .scopebox { margin-top:0; }
+    .time { font-size:44px; margin-top:0; text-align:center; }
+    .peaks { margin-bottom:4px; }
+    .info { margin:2px 0 6px; }
+    .controls { margin-top:4px; }
+    #rec { width:92px; height:92px; }
+    .box { margin-bottom:10px; }
   }
-  .small { font-size:13px; color:var(--dim); }
-  a { color:var(--accent); }
 </style>
 </head>
 <body>
-<h1><span>WaveTagger Rec</span><span class="hbtns"><button class="gear" id="orient" aria-label="画面の向き">向き: 自動</button><button class="gear" id="gear" aria-label="設定">設定</button></span></h1>
+<header>
+  <span class="title">WaveTagger Rec</span>
+  <button class="gear" id="orient" aria-label="画面の向き">向き: 自動</button>
+  <nav class="tabs" id="tabs">
+    <button data-tab="Rec" class="on">録音</button>
+    <button data-tab="Hist">履歴</button>
+    <button data-tab="Set">設定</button>
+  </nav>
+</header>
 
 <div class="box warnbox hidden" id="connectBar"><div class="small" id="connectText"></div><button id="connectNow">Google に接続して送信</button></div>
 
-<div class="meterbox" id="meterbox" title="タップでピーク・クリップ・Integrated をリセット">
-  <div class="mrow" id="rowL"><b id="labL">L</b><div class="meter" id="meterL"><div id="barL"></div><i class="peak" id="peakL"></i></div><div class="vscale"><span style="bottom:0%">-60</span><span style="bottom:33.3%">-40</span><span style="bottom:66.7%">-20</span><span style="bottom:83.3%">-10</span><span style="bottom:100%">0</span></div></div>
-  <div class="mrow" id="rowR"><b>R</b><div class="meter" id="meterR"><div id="barR"></div><i class="peak" id="peakR"></i></div><div class="vscale"><span style="bottom:0%">-60</span><span style="bottom:33.3%">-40</span><span style="bottom:66.7%">-20</span><span style="bottom:83.3%">-10</span><span style="bottom:100%">0</span></div></div>
-  <div class="scale" style="margin-left:20px"><span style="left:0%;transform:none">-60</span><span style="left:33.3%">-40</span><span style="left:66.7%">-20</span><span style="left:83.3%">-10</span><span style="left:100%;transform:translateX(-100%)">0 dB</span></div>
-  <div class="peaks"><span id="peaks">ピーク  L --  /  R --  dBFS</span><span class="clip hidden" id="clip">CLIP</span></div>
-  <div class="lufs" id="lufs">
-    <div><small>Momentary</small><b data-k="lm">--</b></div>
-    <div><small>Short-term</small><b data-k="ls">--</b></div>
-    <div><small>Integrated</small><b data-k="li">--</b></div>
+<section class="tab on" id="tabRec">
+  <div class="meterbox" id="meterbox" title="タップでピーク・クリップ・Integrated をリセット">
+    <div class="mrow" id="rowL"><b id="labL">L</b><div class="meter" id="meterL"><div id="barL"></div><i class="peak" id="peakL"></i></div><div class="vscale"><span style="bottom:0%">-60</span><span style="bottom:33.3%">-40</span><span style="bottom:66.7%">-20</span><span style="bottom:83.3%">-10</span><span style="bottom:100%">0</span></div></div>
+    <div class="mrow" id="rowR"><b>R</b><div class="meter" id="meterR"><div id="barR"></div><i class="peak" id="peakR"></i></div><div class="vscale"><span style="bottom:0%">-60</span><span style="bottom:33.3%">-40</span><span style="bottom:66.7%">-20</span><span style="bottom:83.3%">-10</span><span style="bottom:100%">0</span></div></div>
+    <div class="scale"><span style="left:0%;transform:none">-60</span><span style="left:33.3%">-40</span><span style="left:66.7%">-20</span><span style="left:83.3%">-10</span><span style="left:100%;transform:translateX(-100%)">0 dB</span></div>
   </div>
-  <div class="small" style="text-align:right">LUFS  ·  メーターをタップでリセット</div>
-</div>
-<div class="time" id="time">00:00</div>
-<div class="info" id="info">待機中</div>
-<div class="small" id="diag" style="text-align:center;word-break:break-all"></div>
-<div class="controls">
-  <button id="monitor">入力レベルを確認</button>
-  <div class="recwrap"><button id="rec">録音</button></div>
-</div>
-
-<div class="box" id="formatBox">
-  <h2>録音フォーマット</h2>
-  <div class="seg" id="segCh"><button data-v="stereo">ステレオ</button><button data-v="mono">モノラル</button></div>
-  <div class="seg" id="segRate"><button data-v="48000">48 kHz</button><button data-v="44100">44.1 kHz</button></div>
-  <div class="seg" id="segBits"><button data-v="24">24 bit</button><button data-v="16">16 bit</button></div>
-  <p class="small" style="margin:0">ステレオでも、端末のマイクが 1 チャンネルなら、モノラルで録音されます。録音中は変えられません。</p>
-</div>
-
-<div class="box hidden" id="settings">
-  <h2>設定</h2>
-  <label for="clientId">Google OAuth クライアント ID</label>
-  <input type="text" id="clientId" autocomplete="off" placeholder="xxxx.apps.googleusercontent.com">
-  <label for="folder">保存先の Drive フォルダ (URL または ID)</label>
-  <input type="text" id="folder" autocomplete="off" placeholder="https://drive.google.com/drive/folders/...">
-  <div class="row" style="margin-top:12px">
-    <button id="save">保存</button>
-    <button id="connect">Google に接続</button>
+  <div class="recgrid">
+    <div class="colA">
+      <div class="peaks" id="peaksRow" title="タップでリセット"><span id="peaks">ピーク  L --  /  R --  dBFS</span><span class="clip hidden" id="clip">CLIP</span></div>
+      <div class="lufs" id="lufs" title="タップでリセット">
+        <div><small>Momentary LUFS</small><b data-k="lm">--</b></div>
+        <div><small>Short-term</small><b data-k="ls">--</b></div>
+        <div><small>Integrated</small><b data-k="li">--</b></div>
+      </div>
+      <div class="scopebox" id="scopebox" title="タップで Polar Sample / Lissajous を切り替え"><canvas id="scope"></canvas></div>
+      <div class="corr" id="corr"><span>相関</span><span>-1</span><div class="track"><i id="corrMark"></i></div><span>+1</span><b id="corrNum">--</b></div>
+    </div>
+    <div class="colB">
+      <div class="time" id="time">00:00</div>
+      <div class="info" id="info">待機中</div>
+      <div class="controls">
+        <button id="monitor">入力レベルを確認</button>
+        <div class="recwrap"><button id="rec">録音</button></div>
+      </div>
+    </div>
   </div>
-  <p class="small" id="auth">未接続</p>
-  <p class="small">録音は WAV (初期値は 48 kHz / 24 bit / ステレオ。「録音フォーマット」で変えられます)。保存先はパソコンの Inbox が監視しているフォルダにしてください。</p>
-</div>
+</section>
 
-<div class="box">
-  <h2>最近の録音</h2>
-  <ul id="list"><li class="small">まだありません</li></ul>
-  <div class="row" style="margin-top:8px"><button id="retry" class="hidden">未送信をアップロード</button></div>
-</div>
+<section class="tab" id="tabHist">
+  <div class="box">
+    <h2>最近の録音</h2>
+    <ul id="list"><li class="small">まだありません</li></ul>
+    <div class="row" style="margin-top:8px"><button id="retry" class="hidden">未送信をアップロード</button></div>
+  </div>
+</section>
+
+<section class="tab" id="tabSet">
+  <div class="box" id="formatBox">
+    <h2>録音フォーマット</h2>
+    <div class="seg" id="segCh"><button data-v="stereo">ステレオ</button><button data-v="mono">モノラル</button></div>
+    <div class="seg" id="segRate"><button data-v="48000">48 kHz</button><button data-v="44100">44.1 kHz</button></div>
+    <div class="seg" id="segBits"><button data-v="24">24 bit</button><button data-v="16">16 bit</button></div>
+    <p class="small" style="margin:0">ステレオでも、端末のマイクが 1 チャンネルなら、モノラルで録音されます。録音中は変えられません。</p>
+  </div>
+
+  <div class="box">
+    <h2>入力の診断</h2>
+    <div class="small" id="diag" style="word-break:break-all">マイクを開くと (「入力レベルを確認」か録音) ここに表示されます</div>
+  </div>
+
+  <div class="box" id="settings">
+    <h2>Google Drive</h2>
+    <label for="clientId">Google OAuth クライアント ID</label>
+    <input type="text" id="clientId" autocomplete="off" placeholder="xxxx.apps.googleusercontent.com">
+    <label for="folder">保存先の Drive フォルダ (URL または ID)</label>
+    <input type="text" id="folder" autocomplete="off" placeholder="https://drive.google.com/drive/folders/...">
+    <div class="row" style="margin-top:12px">
+      <button id="save">保存</button>
+      <button id="connect">Google に接続</button>
+    </div>
+    <p class="small" id="auth">未接続</p>
+    <p class="small">録音は WAV (初期値は 48 kHz / 24 bit / ステレオ)。保存先はパソコンの Inbox が監視しているフォルダにしてください。</p>
+  </div>
+</section>
 
 <script src="wav.js"></script>
 <script src="loudness.js"></script>
+<script src="scope.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
