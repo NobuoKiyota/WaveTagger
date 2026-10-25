@@ -117,7 +117,7 @@
 - **無音の録音は保存しない**: `onBlock` で NaN/Infinity を 0 にして数え (`WavEnc.sanitize`、`#diag` に個数)、録音中の最大ピークが 1e-6 以下なら保存せず「録音が無音でした」と表示。2026-10-25 17:18 に Drive へ届いた全サンプル 0 の WAV (2ch/16bit) の原因は未特定 (入力が NaN だった仮説、再現できず)
 - **向きの初期値は横** (`orient = 'landscape'`、最初のタップで `screen.orientation.lock`、ユーザーが選ぶまで保存しない・失敗しても黙る)。**設定ボタン**: 横画面では設定欄が下に出て反応が無いように見えたため、開く時に `scrollIntoView`。モノラルの横画面で R メーターが残るのを `.mrow.hidden{display:none}` で修正
 - ブラウザでの確認 (偽のマイク/偽の Drive): 接続帯→1 回だけトークン要求→送信済み、トークン有効時は要求なしで送信、無音は保存されない、モノラル横画面の R 非表示。**実機のスマホでは未確認**。端末の Firefox は `channelCount` 最大 1 を返す (ブラウザ側の制限。Chrome で要確認)
-- PWA のキャッシュは `sw.js` の `wtrec-v2` (ファイルを増やしたら `FILES` に足して、版を上げる)
+- PWA のキャッシュは `sw.js` の `wtrec-v5` (ファイルを増やしたら `FILES` に足して、版を上げる)。サービスワーカーは `cache: 'no-cache'` でブラウザの HTTP キャッシュも飛ばす。`index.html` のスクリプトは `?v=5` 付き (直したら版を上げる。古い `app.js` が新しい `index.html` と組み合わさってスコープが動かない事故があった)
 
 ## 新規 Category と Type の追加 (`Core/CategoryTypes`, `UI/NewCategoryDialog`)
 - 「Category を追加」(カテゴリ選択の下) は、名前と日本語に加えて **Type の案 (最大 10 個、English / 日本語、編集可)** を決めてから書き込む。案の出し方は 3 つ: (1) **似たカテゴリからコピー** (`rankSimilarCategories`: 名前の語・語頭の一致と日本語の包含/共通 2 文字で並べ、最良を自動で選ぶ。一致が無ければ共通の Type。一覧から手で選べる)、(2) **AI に聞く** (質問文をクリップボードへコピー → Gemini/Claude などに貼る → 返事をコピーして「AI の返事を読み込む」)、(3) 手入力 (↑ で並べ替え)。**API キーも通信も使わない**
@@ -127,9 +127,12 @@
 - **修正**: `Catalog::getTypes ("*", false)` は空を返す (共通 Type は**空のカテゴリ**で引く)。`JapaneseNames::from` がこれを使っていたため、Raw 一括追加で共通 Type (Hit など) の日本語が引けていなかった → 修正済み
 - 検証: `--selftest-newcategory` (40 項目)。画面確認: `--snapshot-newcategory <out.png>`
 
-## Android ネイティブ (`android/`, 検証用 `StereoTest`)
-- 目的: スマホの内蔵マイクをブラウザ経由ではなく `AudioRecord` で開き、**本物のステレオ**で録れるかを確かめる。ブラウザ (Chrome/Firefox) は通話・音声用の経路でマイクを渡すため、左右が同じ音 (モノラルの複製) になる。最終形は 今の `docs/` の画面 (タブ・メーター・スコープ) を WebView に載せ、マイクの取り込みだけ Kotlin にする案
-- `android/StereoTest` (Kotlin、依存なし、minSdk 26 / target 34): 入力元 MIC / CAMCORDER / UNPROCESSED / VOICE_RECOGNITION / VOICE_COMMUNICATION を 6 秒ずつ ステレオ 48 kHz (float32、だめなら int16) で録り、経路・チャンネル数・使われているマイク (`activeMicrophones`)・ピーク・L/R 相関・最大差・0.25 秒ごとの L-R レベル差を表示、「左右が完全に同一 / ほぼ同一 / 別の音」を判定
-- ビルド: `cd android\StereoTest; $env:JAVA_HOME='C:\Program Files\Java\jdk-20'; .\gradlew.bat assembleDebug` (Gradle 8.6 / AGP 8.3.2 / Kotlin 1.9.22 は `%USERPROFILE%\.gradle` にある。Android Studio 同梱の JDK 25 は Gradle 8.6 が使えない)。`local.properties` (sdk.dir) は Git に入れない。出力 `appuild\outputspk\debugpp-debug.apk`、コピーを `android\WTStereoTest.apk` (Git に入れない)
-- **実機 (S21) では未実行**。結果次第で、本格的なネイティブ録音 (フォアグラウンドサービス、WAV 書き出し、Drive 送信、WebView の画面) に進む
-
+## Android ネイティブ (`android/`)
+- 目的: スマホの内蔵マイクをブラウザ経由ではなく `AudioRecord` で開き、**本物のステレオ**で録る。ブラウザ (Chrome/Firefox) は通話・音声用の経路でマイクを渡すため、左右が同じ音 (モノラルの複製) になる (Chrome でも「左右がまったく同じ音です」を確認)
+- **設計案は `android/DESIGN.md`** (未実装。WebView で `docs/` の画面をそのまま使い、マイクの取り込み・WAV・Drive 送信・認可だけ Kotlin。2026-10-26 にレビューを反映: 中身は 16bit 精度、画面オフ中の計算はネイティブ、回転で作り直さない、エフェクト無効化、橋のセキュリティ、モノラルは片方のマイク、48kHz 固定、1 時間/2GB で分割、測定の段階 M0 を追加)。決めてもらうこと: 送信後のコピーを残す日数、OAuth の公開状態 (テストだと同意が約 7 日で切れる)、横画面固定
+- **S21 (SC-51B, Android 15) の実測 (2026-10-25)**: マイクは 2 個 (`builtin_mic_1` 下端寄り / `builtin_mic_2` 上端寄り、約 14.25cm 間隔)。入力元 `MIC` / `CAMCORDER` は左右が別の音、`UNPROCESSED` / `VOICE_RECOGNITION` / `VOICE_COMMUNICATION` は下端のマイク 1 個で左右が完全に同一。WAV 3 本 (`D:\マイドライブ\pcm録音\2026-10-25_18-3*_{MIC,CAMCORDER}.wav`) の分析で、左右の時間差が ±19〜23 サンプル (0.40〜0.48ms) に張り付く = マイク間隔 (0.416ms) と一致、左端/右端を叩くと符号が入れ替わる → **2 個のマイクによる AB ステレオ**。相関は 0.1〜0.3 (AB 方式なので低い)。`CAMCORDER` は叩いた音で 0 dBFS まで振れる。`MIC` / `CAMCORDER` では `routedDevice` / `activeMicrophones` が取れない。**float32 で受け取っても中身は 16bit 精度** (99% のサンプルで 24bit の下位 8 ビットが 0)。未確定: どちらのチャンネルが左か、端末側の処理 (自動音量調整など) の有無
+- 分析: `python Tools/analyse_stereo.py <wav>...` (24bit ステレオ。ピーク・相関・0.5 秒ごとの左右の時間差とレベル差・帯域ごとのコヒーレンス)
+- **ブラウザ版への宿題**: `wav.js` の 16bit 書き出しは TPDF ディザを掛けるが、ブラウザ経由の音も中身が 16bit 精度なら、ディザはノイズを足すだけ (要確認)
+- **`android/StereoTest`** (検証用、Kotlin、依存なし、minSdk 29 / target 34、v0.2): (1) 入力元 MIC / CAMCORDER / UNPROCESSED / VOICE_RECOGNITION / VOICE_COMMUNICATION を 6 秒ずつステレオ 48kHz (float32、だめなら int16) で録り、経路・チャンネル数・使われているマイク・ピーク・相関・最大差・0.25 秒ごとの L-R レベル差と判定を表示。(2) 「ステレオ録音」画面 (`RecordActivity`): MIC / CAMCORDER の左右のメーター (ピークホールド)、左右の入れ替え、24bit ステレオ WAV を `Download/WaveTagger/` に保存 (MediaStore、ヘッダーは最後に書く)
+- ビルド: `cd android\StereoTest; $env:JAVA_HOME='C:\Program Files\Java\jdk-20'; .\gradlew.bat assembleDebug` (Gradle 8.6 / AGP 8.3.2 / Kotlin 1.9.22 は `%USERPROFILE%\.gradle` にある。Android Studio 同梱の JDK 25 は Gradle 8.6 が使えない)。`local.properties` (sdk.dir) は Git に入れない。出力 `app\build\outputs\apk\debug\app-debug.apk`、コピーを `android\WTStereoTest.apk` (Git に入れない)。スマホへは `D:\マイドライブ\pcm録音\WTStereoTest.apk` に置いて Drive アプリから入れた (Inbox が拾わないよう、試験後は消す)
+- デバッグ署名鍵 (`%USERPROFILE%\.android\debug.keystore`) の SHA-1: `94:99:21:6B:1A:D8:8F:1E:CA:05:91:6A:3A:A5:0C:39:2A:1D:C1:EA` (Android 用 OAuth クライアントを作る時に使う)。エミュレーター: Android 34 google_apis x86_64 のイメージあり (AVD は未作成)
