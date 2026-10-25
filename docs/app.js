@@ -289,7 +289,7 @@
       diag.capMax = caps && caps.channelCount ? caps.channelCount.max : null;
       ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: format.rate });
       rate = ctx.sampleRate;
-      return ctx.audioWorklet.addModule('worklet.js');
+      return ctx.audioWorklet.addModule('worklet.js?v=5');
     }).then(function () {
       source = ctx.createMediaStreamSource(stream);
       // 'max': the node takes as many channels as the input really has, so the first block of sound says how many there are
