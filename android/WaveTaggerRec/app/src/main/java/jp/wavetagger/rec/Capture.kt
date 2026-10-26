@@ -54,6 +54,12 @@ object Capture {
         info = null
     }
 
+    /** The recorder first (it is the one that must never miss a block, and it cleans the samples), then the screen if it is listening. */
+    private fun deliver(planar: FloatArray, channels: Int, frames: Int) {
+        Recorder.onBlock(planar, channels, frames)
+        listener?.invoke(planar, channels, frames)
+    }
+
     private fun openMic(source: String, stereo: Boolean, rate: Int): Info {
         val src = if (source == "CAMCORDER") MediaRecorder.AudioSource.CAMCORDER else MediaRecorder.AudioSource.MIC
         var wantChannels = if (stereo) 2 else 1
@@ -77,7 +83,7 @@ object Capture {
                     val n = rec.read(data, 0, data.size, AudioRecord.READ_BLOCKING)
                     if (n <= 0) break
                     val frames = Planar.planarise(data, n, channels, swap && channels == 2, planar)
-                    listener?.invoke(planar, channels, frames)
+                    deliver(planar, channels, frames)
                 }
                 rec.stop()
             } catch (_: Throwable) {
@@ -146,7 +152,7 @@ object Capture {
                     phaseR += 2 * PI * 700.0 / rate
                 }
                 val frames = Planar.planarise(data, BLOCK_FRAMES * channels, channels, swap && channels == 2, planar)
-                listener?.invoke(planar, channels, frames)
+                deliver(planar, channels, frames)
                 sent += BLOCK_FRAMES
                 val due = t0 + sent * 1_000_000_000L / rate
                 val wait = (due - System.nanoTime()) / 1_000_000L

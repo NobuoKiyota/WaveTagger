@@ -81,7 +81,7 @@
 
 ## 6. Google Drive への送信
 
-- Android 用の OAuth クライアント (種類: Android、パッケージ `jp.wavetagger.rec`、署名鍵の SHA-1) を Google Cloud に 1 つ作る。**デバッグ署名鍵の SHA-1: `94:99:21:6B:1A:D8:8F:1E:CA:05:91:6A:3A:A5:0C:39:2A:1D:C1:EA`** (このアプリを入れる時の署名鍵。鍵を変えると作り直し)
+- Android 用の OAuth クライアント (種類: Android、パッケージ `jp.wavetagger.rec`、署名鍵の SHA-1) を Google Cloud に 1 つ作る。**デバッグ署名鍵の SHA-1: `F4:9D:90:D2:DB:51:82:0E:7B:57:B7:97:98:B9:88:99:7C:A3:D9:61`** (このアプリを入れる時の署名鍵。鍵を変えると作り直し)
 - 認可は Google Play 開発者サービスの `AuthorizationClient` (範囲: `drive`、今の Web 版と同じ。Inbox の既存フォルダに書くため `drive.file` では足りない)。**初回だけ同意画面**が出て、以降は**画面なしでアクセストークンを更新**する
 - 送信は WorkManager (ネットワークがある時だけ、失敗は自動で再試行、アプリが閉じても続く)。方式は Web 版と同じ Drive の再開可能アップロード (`uploadType=resumable`、親フォルダ = 設定のフォルダ ID)
 - **裏で動く送信は同意画面を出せない**: 同意が必要になったら (期限切れ・取り消し) 送信を止め、通知で「Google への接続が必要です」と知らせる。アプリを開いて接続帯を押すと同意画面

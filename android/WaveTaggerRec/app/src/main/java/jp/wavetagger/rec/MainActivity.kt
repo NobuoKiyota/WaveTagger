@@ -38,7 +38,7 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
 
     private var visible = false
-    private var recording = false // the screen is recording: the left/right assignment must not change now
+    private var recording = Recorder.isRecording // the screen is recording: the left/right assignment must not change now
     private var pendingOpen: Pair<Int, String>? = null
 
     private val inflight = AtomicInteger(0)
@@ -51,6 +51,13 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("wtrec", MODE_PRIVATE)
+        Recordings.init(filesDir)
+        if (!Recorder.isRecording) Thread { // a recording cut off by a crash is repaired; sent ones are removed after the keep time
+            Recordings.recover()
+            Recordings.cleanup(prefs.getInt("keepDays", 7))
+            copyToDownloads()
+            if (prefs.getBoolean("authOk", false) && Recordings.list().any { it.status != "done" }) UploadWorker.enqueue(this)
+        }.start()
 
         val loader = WebViewAssetLoader.Builder()
             .setDomain(DOMAIN)
@@ -108,16 +115,27 @@ class MainActivity : Activity() {
             when (method) {
                 "open" -> openMicrophone(id, json)
                 "close" -> { closeMicrophone(); resolve(id, true, "{}") }
-                "setRecording" -> { recording = args.optBoolean("on"); if (!recording) updateSwap(); resolve(id, true, "{}") }
+                "startRecording" -> resolve(id, true, startRecording(args.optInt("bits", 24)).toString())
+                "stopRecording" -> resolve(id, true, stopRecording().toString())
+                "listRecordings" -> resolve(id, true, listRecordings().toString())
+                "deleteRecording" -> resolve(id, true, JSONObject().put("deleted", Recordings.delete(args.optString("name"), false)).toString())
                 "getState" -> resolve(id, true, state().toString())
                 "getSettings" -> resolve(id, true, settings().toString())
                 "setSettings" -> {
-                    prefs.edit()
-                        .putString("source", args.optString("source", "MIC"))
-                        .putBoolean("swap", args.optBoolean("swap", false))
-                        .apply()
-                    updateSwap()
+                    prefs.edit().apply {
+                        putString("source", args.optString("source", prefs.getString("source", "MIC")))
+                        if (args.has("folder")) putString("folder", args.optString("folder").trim())
+                    }.apply()
                     resolve(id, true, settings().toString())
+                }
+                "connect" -> connectGoogle(id)
+                "upload" -> { UploadWorker.enqueue(this); resolve(id, true, state().toString()) }
+                "flipSwap" -> { // the automatic left/right adjustment found this rotation reversed
+                    if (recording) throw IllegalStateException("録音中は変えられません")
+                    val key = "flip" + rotationName()
+                    prefs.edit().putBoolean(key, !prefs.getBoolean(key, false)).apply()
+                    updateSwap()
+                    resolve(id, true, state().toString())
                 }
                 else -> resolve(id, false, "unknown method: $method")
             }
@@ -128,9 +146,59 @@ class MainActivity : Activity() {
 
     private fun settings() = JSONObject()
         .put("source", prefs.getString("source", "MIC"))
-        .put("swap", prefs.getBoolean("swap", false))
+        .put("flip90", prefs.getBoolean("flip90", false))
+        .put("flip270", prefs.getBoolean("flip270", false))
+        .put("folder", prefs.getString("folder", ""))
+
+    // ---------------------------------------------------------------- Google (consent screen only when Google asks for it)
+    private var pendingConnect: Int? = null
+
+    private fun connectGoogle(id: Int) {
+        GoogleAuth.client(this).authorize(GoogleAuth.request())
+            .addOnSuccessListener { r ->
+                val pending = r.pendingIntent
+                if (r.hasResolution() && pending != null) {
+                    pendingConnect = id
+                    try { startIntentSenderForResult(pending.intentSender, REQUEST_GOOGLE, null, 0, 0, 0) }
+                    catch (e: Throwable) { pendingConnect = null; resolve(id, false, e.message ?: e.toString()) }
+                } else {
+                    prefs.edit().putBoolean("authOk", true).remove("uploadError").apply()
+                    UploadWorker.enqueue(this)
+                    resolve(id, true, state().toString())
+                }
+            }
+            .addOnFailureListener { e -> resolve(id, false, "Google に接続できません: " + (e.message ?: e.toString())) }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_GOOGLE) return
+        val id = pendingConnect
+        pendingConnect = null
+        fun fail(why: String) {
+            prefs.edit().putString("uploadError", why).apply()
+            if (id != null) resolve(id, false, why)
+        }
+        try {
+            val r = GoogleAuth.client(this).getAuthorizationResultFromIntent(data)
+            if (r.accessToken != null) {
+                prefs.edit().putBoolean("authOk", true).remove("uploadError").apply()
+                UploadWorker.enqueue(this)
+                if (id != null) resolve(id, true, state().toString())
+            } else fail("Google の許可が得られませんでした (resultCode=$resultCode, トークンなし)")
+        } catch (e: Throwable) {
+            val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode
+            fail("Google の許可が得られませんでした (resultCode=$resultCode" + (if (code != null) ", status=$code" else "") +
+                (if (e.message != null) ", " + e.message else "") + ")")
+        }
+    }
 
     private fun state() = JSONObject()
+        .put("folderSet", !prefs.getString("folder", "").isNullOrEmpty())
+        .put("authOk", prefs.getBoolean("authOk", false))
+        .put("uploadError", prefs.getString("uploadError", "") ?: "")
+        .put("waiting", Recordings.list().count { it.status != "done" })
         .put("open", Capture.isOpen)
         .put("recording", recording)
         .put("transport", if (arrayBuffers) "arraybuffer" else "base64")
@@ -185,6 +253,46 @@ class MainActivity : Activity() {
         stopService(Intent(this, CaptureService::class.java))
     }
 
+    // ---------------------------------------------------------------- recording (the files are written by Recorder, which does not depend on the screen)
+    private fun startRecording(bits: Int): JSONObject {
+        val info = Capture.info ?: throw IllegalStateException("マイクが開いていません")
+        if (recording) throw IllegalStateException("すでに録音中です")
+        updateSwap() // the left/right assignment is fixed from here to the end of the recording
+        val comment = "device=${Build.MANUFACTURER} ${Build.MODEL}; source=${info.source}; mics=2 built-in (AB, about 14 cm apart)" +
+            "; swap=${Capture.swap}; rotation=${rotationName()}; effects=${info.effects.ifEmpty { "-" }}" +
+            "; content=16-bit precision (the phone delivers a 16-bit signal)"
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", java.util.Locale.US).format(java.util.Date())
+        val name = Recorder.start(Recordings.dir, stamp, info.channels, info.rate, if (bits == 16) 16 else 24, comment)
+        recording = true
+        ContextCompat.startForegroundService(this, Intent(this, CaptureService::class.java).putExtra(CaptureService.EXTRA_RECORDING, true))
+        return JSONObject().put("name", name)
+    }
+
+    private fun stopRecording(): JSONObject {
+        val source = Capture.info?.source ?: ""
+        val r = Recorder.stop(source)
+        recording = false
+        updateSwap()
+        ContextCompat.startForegroundService(this, Intent(this, CaptureService::class.java)) // back to the plain notification
+        Thread { copyToDownloads() }.start()
+        if (!r.silent) UploadWorker.enqueue(this) // to Drive when there is a network (and Google is connected)
+        return JSONObject().put("files", org.json.JSONArray(r.files)).put("seconds", r.seconds).put("peak", r.peak.toDouble())
+            .put("silent", r.silent).put("bad", r.badSamples).put("error", r.error ?: JSONObject.NULL)
+    }
+
+    /** A copy in Download/WaveTagger for listening back and for getting the files to the PC (the setting `copyDownloads`, on by default). */
+    private fun copyToDownloads() {
+        if (prefs.getBoolean("copyDownloads", true)) try { Downloads.copyMissing(this) } catch (e: Throwable) { Log.w(TAG, "copy failed: $e") }
+    }
+
+    private fun listRecordings(): org.json.JSONArray {
+        val a = org.json.JSONArray()
+        for (m in Recordings.list()) a.put(JSONObject()
+            .put("name", m.name).put("seconds", m.seconds).put("channels", m.channels).put("rate", m.rate).put("bits", m.bits)
+            .put("status", m.status).put("recovered", m.recovered).put("createdAt", m.createdAt))
+        return a
+    }
+
     // ---------------------------------------------------------------- blocks to the page
     private fun onBlock(planar: FloatArray, channels: Int, frames: Int) {
         if (!visible) return // the page does not run in the background: nothing is queued up for it
@@ -215,7 +323,8 @@ class MainActivity : Activity() {
     private fun updateSwap() {
         if (recording) return // never change the assignment in the middle of a recording
         val rotation = windowManager.defaultDisplay.rotation
-        Capture.swap = (rotation == Surface.ROTATION_90) != prefs.getBoolean("swap", false)
+        // the guess (swap at 90°) corrected by what the automatic adjustment found for this very rotation
+        Capture.swap = (rotation == Surface.ROTATION_90) != prefs.getBoolean("flip" + rotationName(), false)
     }
 
     private fun rotationName() = when (windowManager.defaultDisplay.rotation) {
@@ -258,6 +367,7 @@ class MainActivity : Activity() {
         private const val TAG = "WTRec"
         private const val DOMAIN = "appassets.androidplatform.net"
         private const val REQUEST_AUDIO = 7
+        private const val REQUEST_GOOGLE = 8
         private const val MAX_INFLIGHT = 6
     }
 }

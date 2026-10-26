@@ -38,5 +38,9 @@ tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.con
 
 dependencies {
     implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.work:work-runtime:2.9.1")           // sending that survives the app being closed, retries by itself
+    implementation("com.google.android.gms:play-services-auth:21.2.0") // AuthorizationClient: the Google consent and the access token
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0") // a fake Drive for the upload tests
+    testImplementation("org.json:json:20231013") // the android.jar one is only a stub in plain JVM tests
 }

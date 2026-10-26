@@ -99,13 +99,23 @@
 
   var waitingCount = 0; // recordings that are not in Drive yet
 
+  var nat = { authOk: false, folderSet: false, uploadError: '' }; // what the Android app says about Google and sending
+  function isNative() { return !!(window.WTNative && WTNative.available); }
+
   function showAuth() {
-    $('auth').textContent = tokenValid() ? '接続済み (約 1 時間有効)' : '未接続';
+    if (isNative()) $('auth').textContent = (nat.authOk ? '接続済み' : '未接続') + (nat.uploadError ? '  ·  ' + nat.uploadError : '');
+    else $('auth').textContent = tokenValid() ? '接続済み (約 1 時間有効)' : '未接続';
     showConnect();
   }
 
   // Recordings are never held up by a sign-in: they wait, and this bar offers to connect when it suits the user.
   function showConnect() {
+    if (isNative()) {
+      var needNative = waitingCount > 0 && nat.folderSet && !nat.authOk;
+      $('connectBar').classList.toggle('hidden', !needNative);
+      if (needNative) $('connectText').textContent = '送信待ちが ' + waitingCount + ' 件あります。Google に接続すると送信します';
+      return;
+    }
     var s = loadSettings();
     var need = waitingCount > 0 && !tokenValid() && !!s.clientId && !!folderIdOf(s.folder);
     $('connectBar').classList.toggle('hidden', !need);
@@ -217,7 +227,8 @@
     if (d === 'flushed') { if (flushDone) flushDone(); return; }
     if (!Array.isArray(d)) return;
     badSamples += WavEnc.sanitize(d);
-    if (recording || flushing) chunks.push(d);
+    if (calSink) calSink(d);
+    if ((recording || flushing) && !nativeOpen) chunks.push(d); // the app writes its own file: nothing piles up in the page
     if (!meter) return;
     if (channels === 2 && d.length >= 2) scope.push(d, rate);
 
@@ -358,7 +369,7 @@
     clearInterval(timer);
     timer = null;
     scopeStop();
-    if (nativeOpen) { nativeOpen = false; WTNative.onBlock = null; WTNative.setRecording(false).then(function () { return WTNative.close(); }, function () {}); }
+    if (nativeOpen) { nativeOpen = false; WTNative.onBlock = null; WTNative.close().catch(function () {}); }
     if (node) node.port.onmessage = null;
     try { if (source) source.disconnect(); } catch (e) { /* already gone */ }
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
@@ -426,6 +437,8 @@
 
   function startRecording() {
     return openInput().then(function () {
+      return nativeOpen ? WTNative.startRecording({ bits: format.bits }) : null; // the app starts writing the file (and fixes left/right)
+    }).then(function () {
       meter.reset();                    // the integrated loudness is that of this recording
       peakHold = [0, 0]; clipped = false;
       recPeak = 0; badSamples = 0;
@@ -439,7 +452,25 @@
       $('monitor').textContent = '入力レベルを確認';
       $('monitor').classList.remove('on');
       $('info').textContent = formatText(channels, rate, bits) + formatNote;
-      if (nativeOpen) WTNative.setRecording(true);
+    });
+  }
+
+  // Android app: the file was written by the app; this only shows what happened.
+  function stopNative() {
+    return WTNative.stopRecording().then(function (r) {
+      closeInput();
+      setBusy();
+      if (r.silent) {
+        $('info').textContent = '録音が無音でした (マイクの音が届いていません)。保存しません。もう一度「入力レベルを確認」でメーターが動くか見てください';
+        return;
+      }
+      $('info').textContent = '保存しました: ' + r.files.join(', ') + (r.files.length > 1 ? ' (長いので分割しました)' : '') + (nat.authOk ? '  (Drive へ送信します)' : '  (Google に未接続: 送信待ちです)')
+        + (r.error ? '  ※書き込み中のエラー: ' + r.error : '');
+      return renderList();
+    }, function (e) {
+      closeInput();
+      setBusy();
+      $('info').textContent = '録音を終えられませんでした: ' + (e && e.message || e);
     });
   }
 
@@ -448,6 +479,7 @@
     $('rec').classList.remove('on');
     $('rec').textContent = '録音';
     $('info').textContent = '保存中...';
+    if (nativeOpen) return stopNative();
 
     return new Promise(function (resolve) {
       var done = false;
@@ -519,8 +551,17 @@
   }
 
   // ---------------------------------------------------------------- UI
+  function nativeRecs() {
+    return WTNative.listRecordings().then(function (list) {
+      return list.map(function (r) {
+        return { name: r.name, seconds: r.seconds, status: r.status === 'done' ? 'done' : 'wait',
+                 format: r.channels ? { channels: r.channels, bits: r.bits } : null, recovered: r.recovered };
+      });
+    });
+  }
+
   function renderList() {
-    return allRecs().then(function (recs) {
+    return (window.WTNative && WTNative.available ? nativeRecs() : allRecs()).then(function (recs) {
       var ul = $('list');
       ul.textContent = '';
       var waiting = 0;
@@ -530,7 +571,7 @@
       recs.slice(0, 20).forEach(function (r) {
         var li = document.createElement('li');
         var a = document.createElement('span');
-        a.textContent = r.name + '  ' + Math.round(r.seconds || 0) + ' 秒' + (r.format ? '  ' + (r.format.channels === 2 ? 'ステレオ' : 'モノラル') + ' ' + r.format.bits + 'bit' : '');
+        a.textContent = r.name + (r.recovered ? ' (回復)' : '') + '  ' + Math.round(r.seconds || 0) + ' 秒' + (r.format ? '  ' + (r.format.channels === 2 ? 'ステレオ' : 'モノラル') + ' ' + r.format.bits + 'bit' : '');
         var b = document.createElement('span');
         if (r.status === 'done') { b.className = 'st-done'; b.textContent = 'Drive に送信済み'; }
         else if (r.status === 'fail') { b.className = 'st-fail'; b.textContent = '失敗: ' + r.error; waiting++; }
@@ -668,14 +709,17 @@
   $('connectNow').addEventListener('click', function () { $('retry').click(); });
   setInterval(showAuth, 30000); // the token runs out after about an hour: the bar appears by itself
   $('save').addEventListener('click', function () {
+    if (isNative()) { WTNative.setSettings({ folder: folderIdOf($('folder').value) }).then(refreshNative); $('info').textContent = '設定を保存しました'; return; }
     saveSettings({ clientId: $('clientId').value.trim(), folder: folderIdOf($('folder').value) });
     $('info').textContent = '設定を保存しました';
   });
   $('connect').addEventListener('click', function () {
+    if (isNative()) { connectNative(); return; }
     saveSettings({ clientId: $('clientId').value.trim(), folder: folderIdOf($('folder').value) });
     requestToken().then(function () { return uploadPending(); }).catch(function (e) { $('auth').textContent = String(e.message || e); });
   });
   $('retry').addEventListener('click', function () {
+    if (isNative()) { if (nat.authOk) WTNative.upload().then(refreshNative); else connectNative(); return; }
     var go = tokenValid() ? Promise.resolve() : requestToken();
     go.then(function () {
       return allRecs().then(function (recs) {
@@ -700,12 +744,91 @@
   var s0 = loadSettings();
   $('clientId').value = s0.clientId || '';
   $('folder').value = s0.folder || '';
-  if (!s0.clientId || !s0.folder) showTab('Set'); // nothing to send to yet: start at the settings
+  if (!isNative() && (!s0.clientId || !s0.folder)) showTab('Set'); // nothing to send to yet: start at the settings
   showAuth();
   renderList();
   showFormat();
   showOrient();
   showIdle();
+  // ---- Android app: automatic left/right adjustment. The user taps the left edge of the screen, then the right edge; the app compares
+  // the two channels in each part. If the left taps are louder on R (and the right taps on L), the channels are reversed for this rotation.
+  var calSink = null;
+
+  function calibrate() {
+    var msg = $('calMsg'), btn = $('calBtn');
+    if (recording || monitoring) { msg.textContent = '録音中・確認中は調整できません。止めてからもう一度どうぞ'; return; }
+    btn.disabled = true;
+    var energy = { left: [0, 0, 0], right: [0, 0, 0] }, phase = null;
+    calSink = function (d) {
+      if (!phase || d.length < 2) return;
+      var l = d[0], r = d[1], el = 0, er = 0;
+      for (var i = 0; i < l.length; i++) { el += l[i] * l[i]; er += r[i] * r[i]; }
+      var e = energy[phase]; e[0] += el; e[1] += er; e[2] += l.length;
+    };
+    var step = function (text, name, seconds) {
+      return new Promise(function (resolve) {
+        var left = seconds;
+        phase = name;
+        var show = function () { msg.textContent = text + '  (あと ' + left + ' 秒)'; };
+        show();
+        var t = setInterval(function () { left--; if (left <= 0) { clearInterval(t); phase = null; resolve(); } else show(); }, 1000);
+      });
+    };
+    var db = function (x) { return 10 * Math.log10(x + 1e-20); };
+    msg.textContent = 'マイクを開いています...';
+    openInput().then(function () {
+      if (channels !== 2) throw new Error('この端末のマイクは 1 チャンネルなので、左右の調整はできません');
+      msg.textContent = 'スマホを横に持って、そのままお待ちください...';
+      return new Promise(function (r) { setTimeout(r, 2000); });
+    }).then(function () {
+      return step('画面の【左の端】を指で 5 回、トントンと叩いてください', 'left', 7);
+    }).then(function () {
+      return step('次に、画面の【右の端】を 5 回、トントンと叩いてください', 'right', 7);
+    }).then(function () {
+      var a = energy.left, b = energy.right;
+      // how much more the left channel hears the left taps than the right taps; a correct setup gives a clearly positive number
+      var score = (db(a[0]) - db(a[1])) - (db(b[0]) - db(b[1]));
+      calSink = null;
+      closeInput();
+      if (Math.abs(score) < 4) { msg.textContent = 'はっきり判定できませんでした (差 ' + score.toFixed(1) + ' dB)。もう少し強く、画面の端を叩いてもう一度どうぞ'; return; }
+      if (score > 0) { msg.textContent = '左右は合っています (差 ' + score.toFixed(1) + ' dB)。この向きの調整は不要でした'; return; }
+      return WTNative.flipSwap().then(function () {
+        msg.textContent = '左右が逆でした (差 ' + score.toFixed(1) + ' dB)。この向きは入れ替えるように直しました。確認したい時は、もう一度調整を行ってください';
+      });
+    }).catch(function (e) {
+      calSink = null;
+      closeInput();
+      msg.textContent = '調整できませんでした: ' + (e && e.message || e);
+    }).then(function () { btn.disabled = false; });
+  }
+
+  // ---- Android app: Google and sending are the app's business (Google's consent screen, a background sender). The page shows the state.
+  function refreshNative() {
+    return Promise.all([WTNative.getState(), WTNative.getSettings()]).then(function (r) {
+      nat.authOk = !!r[0].authOk; nat.folderSet = !!r[0].folderSet; nat.uploadError = r[0].uploadError || '';
+      if (document.activeElement !== $('folder')) $('folder').value = r[1].folder || '';
+      showAuth();
+      return renderList();
+    }).catch(function () { /* the app is busy: the next round will do */ });
+  }
+
+  function connectNative() {
+    var folder = folderIdOf($('folder').value);
+    $('auth').textContent = 'Google に接続しています...';
+    WTNative.setSettings({ folder: folder }).then(function () { return WTNative.connect(); }).then(refreshNative, function (e) {
+      $('auth').textContent = String(e && e.message || e);
+    });
+  }
+
+  if (isNative()) {
+    $('calBox').classList.remove('hidden');
+    $('calBtn').addEventListener('click', calibrate);
+    $('clientId').classList.add('hidden');             // the app is identified by its package and signing key, not by a client ID typed here
+    var cl = document.querySelector('label[for="clientId"]'); if (cl) cl.classList.add('hidden');
+    refreshNative().then(function () { if (!nat.folderSet) showTab('Set'); });
+    setInterval(refreshNative, 10000);                 // sending goes on in the background: the history follows
+  }
+
   if (window.WTNative && WTNative.available) { var oe = $('orient'); if (oe) oe.classList.add('hidden'); } // the app is locked to landscape itself
   if (!(window.WTNative && WTNative.available) && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
 })();

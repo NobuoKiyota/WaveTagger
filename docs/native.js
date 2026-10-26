@@ -65,8 +65,17 @@
     });
   };
   WTNative.close = function () { return call('close'); };
-  WTNative.setRecording = function (on) { return call('setRecording', { on: !!on }); };
+  /** The app writes the WAV itself (also with the screen off). startRecording({bits}) -> {name}; stopRecording() -> {files, seconds, peak, silent, error}. */
+  WTNative.startRecording = function (opts) { return call('startRecording', opts); };
+  WTNative.stopRecording = function () { return call('stopRecording'); };
+  WTNative.listRecordings = function () { return call('listRecordings'); };
+  WTNative.deleteRecording = function (name) { return call('deleteRecording', { name: name }); };
   WTNative.getState = function () { return call('getState'); };
+  /** The automatic left/right adjustment found the channels reversed for the current rotation: swap them from now on. */
+  WTNative.flipSwap = function () { return call('flipSwap'); };
+  /** Google's consent screen (only when Google asks for it), then the waiting recordings are sent. */
+  WTNative.connect = function () { return call('connect'); };
+  WTNative.upload = function () { return call('upload'); };
   WTNative.getSettings = function () { return call('getSettings'); };
   WTNative.setSettings = function (s) { return call('setSettings', s); };
   WTNative.onBlock = null;

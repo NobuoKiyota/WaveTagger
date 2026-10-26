@@ -135,4 +135,16 @@
 - **ブラウザ版への宿題**: `wav.js` の 16bit 書き出しは TPDF ディザを掛けるが、ブラウザ経由の音も中身が 16bit 精度なら、ディザはノイズを足すだけ (要確認)
 - **`android/StereoTest`** (検証用、Kotlin、依存なし、minSdk 29 / target 34、v0.2): (1) 入力元 MIC / CAMCORDER / UNPROCESSED / VOICE_RECOGNITION / VOICE_COMMUNICATION を 6 秒ずつステレオ 48kHz (float32、だめなら int16) で録り、経路・チャンネル数・使われているマイク・ピーク・相関・最大差・0.25 秒ごとの L-R レベル差と判定を表示。(2) 「ステレオ録音」画面 (`RecordActivity`): MIC / CAMCORDER の左右のメーター (ピークホールド)、左右の入れ替え、24bit ステレオ WAV を `Download/WaveTagger/` に保存 (MediaStore、ヘッダーは最後に書く)
 - ビルド: `cd android\StereoTest; $env:JAVA_HOME='C:\Program Files\Java\jdk-20'; .\gradlew.bat assembleDebug` (Gradle 8.6 / AGP 8.3.2 / Kotlin 1.9.22 は `%USERPROFILE%\.gradle` にある。Android Studio 同梱の JDK 25 は Gradle 8.6 が使えない)。`local.properties` (sdk.dir) は Git に入れない。出力 `app\build\outputs\apk\debug\app-debug.apk`、コピーを `android\WTStereoTest.apk` (Git に入れない)。スマホへは `D:\マイドライブ\pcm録音\WTStereoTest.apk` に置いて Drive アプリから入れた (Inbox が拾わないよう、試験後は消す)
-- デバッグ署名鍵 (`%USERPROFILE%\.android\debug.keystore`) の SHA-1: `94:99:21:6B:1A:D8:8F:1E:CA:05:91:6A:3A:A5:0C:39:2A:1D:C1:EA` (Android 用 OAuth クライアントを作る時に使う)。エミュレーター: Android 34 google_apis x86_64 のイメージあり (AVD は未作成)
+- デバッグ署名鍵 (`%USERPROFILE%\.android\debug.keystore`) の SHA-1: `F4:9D:90:D2:DB:51:82:0E:7B:57:B7:97:98:B9:88:99:7C:A3:D9:61` (Android 用 OAuth クライアントを作る時に使う)。エミュレーター: Android 34 google_apis x86_64 のイメージあり (AVD は未作成)
+
+## Android ネイティブ録音アプリ `android/WaveTaggerRec` (M1・M2)
+- 画面は `docs/` を Gradle (`syncWeb`) で assets にコピーして WebView (`WebViewAssetLoader`) で表示。`docs/native.js` が `WTNativeBridge` の有無でネイティブ版を判定 (ブラウザでは何もしない)。ネイティブ時は `app.js` がマイクの開閉・録音・履歴をアプリに任せる (ブラウザの枝は残してある)
+- `Capture` (AudioRecord MIC/CAMCORDER/TEST、float32 ステレオ 48kHz、エフェクト無効化) → `Recorder` (画面に依存せず WAV 書き込み) → 画面へはブロックを ArrayBuffer で送る (画面が裏の間は送らない)。録音中は `CaptureService` (前面サービス + 部分ウェイクロック)
+- **左右の割り当て (S21 実測 2026-10-26)**: スマホを横にして、チャンネル 0 = 下端のマイク、1 = 上端。`ROTATION_90` (上端が左) で入れ替え、`ROTATION_270` では入れ替えない (270° は物理からの推定で未測定)。録音中は割り当てを変えない。設定 `swap` で手動反転可
+- WAV (`WavWriter`): 録音中は `<日時>.wav.part`、停止で `.wav` に改名。ヘッダー (INFO コメント付き、固定長) を 1 秒ごとに更新して `force`。24bit は ×2^23、16bit は ×2^15 で、16bit 格子に乗った信号 (端末のマイク) はそのまま (無損失)、そうでない信号の 16bit だけ TPDF ディザ。1 時間または 2GB で `_2`, `_3` に分割。最大ピーク 1e-6 以下は保存しない。NaN は 0 にして数える
+- 回復: 起動時に `.wav.part` を実サイズから直して `_recovered.wav` として履歴へ。`Recordings` = `<name>.wav` + `<name>.json` (秒数・形式・状態 wait/done)。送信済みは `keepDays` (既定 7) 日後に削除、未送信は決して削除しない
+- **左右の自動調整** (設定タブ「左右の自動調整」, `calibrate()` in `docs/app.js`): 左端→右端を叩いて L/R の差から向きを判定、逆なら `WTNative.flipSwap()` → 回転ごとの補正 `flip90`/`flip270` (SharedPreferences)。実効 swap = (ROTATION_90) XOR flipN。S21 で片方の向きが逆と判明し補正済み (どちらの向きかは未記録)
+- **Downloads コピー** (`Downloads.kt`): 録音を `Download/WaveTagger/` に MediaStore で複製 (`copyDownloads` 既定 true)
+- **M3 Drive 送信**: `GoogleAuth` (Play services `AuthorizationClient`、スコープ `drive`、同意後は背景でもサイレントにトークン更新) / `DriveUploader` (再開可能アップロード 8MiB チャンク、401→Auth、5xx→Retry、404→Fatal) / `UploadWorker` (WorkManager、ネットワーク必須、同意が要る時は通知)。送信済みは Drive 確認後だけ `markSent`。設定タブにフォルダ (URL/ID) と「Google に接続」。**必要な準備: Cloud Console で Android 用 OAuth クライアント (パッケージ `jp.wavetagger.rec` + デバッグ署名 SHA-1)**。テスト 17 項目 (`DriveUploaderTest` は MockWebServer)。実 Google/Drive での確認は未実施
+- 未実装: ネイティブ側の Integrated LUFS (画面が前の間は JS が計算)、入力元/左右反転の設定画面、通知の停止ボタン、ページ再生成時の状態復元
+- 検証: `cd android\WaveTaggerRec; $env:JAVA_HOME='C:\Users\kiyot\.gradle\jdks\eclipse_adoptium-17-amd64-windows.2'; .\gradlew.bat --no-daemon testDebugUnitTest assembleDebug` (12 項目: ヘッダー・サンプル完全一致・16bit 無損失/ディザ・回復・分割・無音・保持期間)。エミュレーター (Pixel_7a) で録音→停止→強制終了→回復まで確認。実機の画面オフ録音は未確認
