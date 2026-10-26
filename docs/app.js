@@ -238,8 +238,10 @@
   }
 
   // Opens the microphone (once; the level check and the recording both use it).
+  var nativeOpen = false; // the Android app holds the microphone (window.WTNative, native.js)
+
   function openInput() {
-    if (stream) return Promise.resolve();
+    if (stream || nativeOpen) return Promise.resolve();
     if (opening) return opening;
     opening = openInputNow().then(function () { opening = null; }, function (e) { opening = null; throw e; });
     return opening;
@@ -279,6 +281,19 @@
     var wantStereo = format.channels === 'stereo';
     diag = { label: '', reported: null, capMax: null, got: 0, how: '', maxDiff: 0, loud: 0, checked: false, dual: false };
 
+    if (window.WTNative && WTNative.available) { // the Android app reads the microphone; blocks come through native.js
+      return WTNative.open({ stereo: wantStereo, rate: format.rate }).then(function (info) {
+        rate = info.rate;
+        diag.label = info.label + (info.effects ? ' [' + info.effects + ']' : '');
+        diag.reported = info.channels;
+        diag.how = wantStereo ? '2 ch' : '1 ch';
+        nativeOpen = true;
+        WTNative.onBlock = onBlock;
+        WTNative.onClosed = function () { if (!recording) closeInput(); };
+        return finishOpen(info.channels, wantStereo);
+      }).catch(function (e) { closeInput(); throw e; });
+    }
+
     return getStream(wantStereo).then(function (s) {
       stream = s;
       var track = s.getAudioTracks()[0];
@@ -303,11 +318,21 @@
         setTimeout(function () { finish(diag.reported || 1); }, 1500);
       });
     }).then(function (got) {
+      node.channelCountMode = 'explicit';
+      node.channelCount = wantStereo ? (got >= 2 ? 2 : 1) : 1;
+      return finishOpen(got, wantStereo);
+    }).catch(function (e) {
+      closeInput();
+      throw e;
+    });
+  }
+
+  // The input is open and its channel count is known: set up the meters and start listening.
+  function finishOpen(got, wantStereo) {
+    return Promise.resolve().then(function () {
       diag.got = got;
       // stereo only if two channels really arrive; mono is always one (a wider input is mixed down by the browser, never the other way round)
       channels = wantStereo ? (got >= 2 ? 2 : 1) : 1;
-      node.channelCountMode = 'explicit';
-      node.channelCount = channels;
       bits = format.bits;
       formatNote = (wantStereo && channels === 1 ? ' (ブラウザがこのマイクを 1 チャンネルでしか渡さないため、モノラルです)' : '')
                    + (rate !== format.rate ? ' (端末が ' + format.rate + ' Hz に対応していません)' : '');
@@ -316,7 +341,7 @@
       showChannels(channels);
       resetReadout();
       chunks = [];
-      node.port.onmessage = onBlock;
+      if (node) node.port.onmessage = onBlock;
       showDiag();
       wakeOn();
       scope.clear();
@@ -333,6 +358,7 @@
     clearInterval(timer);
     timer = null;
     scopeStop();
+    if (nativeOpen) { nativeOpen = false; WTNative.onBlock = null; WTNative.setRecording(false).then(function () { return WTNative.close(); }, function () {}); }
     if (node) node.port.onmessage = null;
     try { if (source) source.disconnect(); } catch (e) { /* already gone */ }
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
@@ -413,6 +439,7 @@
       $('monitor').textContent = '入力レベルを確認';
       $('monitor').classList.remove('on');
       $('info').textContent = formatText(channels, rate, bits) + formatNote;
+      if (nativeOpen) WTNative.setRecording(true);
     });
   }
 
@@ -427,8 +454,8 @@
       var finish = function () { if (!done) { done = true; flushing = false; flushDone = null; resolve(); } };
       flushing = true;
       flushDone = finish;
-      node.port.postMessage('flush');
-      setTimeout(finish, 500);
+      if (nativeOpen) setTimeout(finish, 100); // blocks already sent are in the page's message queue; there is nothing to flush
+      else { node.port.postMessage('flush'); setTimeout(finish, 500); }
     }).then(function () {
       // a recording in which nothing but zeros arrived is of no use: say so instead of saving and sending an empty file
       if (!(recPeak > 1e-6)) {
@@ -679,5 +706,6 @@
   showFormat();
   showOrient();
   showIdle();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
+  if (window.WTNative && WTNative.available) { var oe = $('orient'); if (oe) oe.classList.add('hidden'); } // the app is locked to landscape itself
+  if (!(window.WTNative && WTNative.available) && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
 })();

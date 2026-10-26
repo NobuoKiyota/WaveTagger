@@ -8,6 +8,11 @@ import android.graphics.Typeface
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AudioEffect
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
+import android.view.Surface
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -57,6 +62,8 @@ class RecordActivity : Activity() {
     private var holdL = 0.0
     private var holdR = 0.0
     private var holdAt = 0L
+    private lateinit var rotationText: TextView
+    private val effects = ArrayList<AudioEffect>() // kept alive for as long as the microphone is open
 
     private class WavWriter(val uri: Uri, val name: String, private val out: FileOutputStream, private val rate: Int) {
         var frames = 0L
@@ -110,6 +117,7 @@ class RecordActivity : Activity() {
         recButton = Button(this).apply { text = "録音"; isEnabled = false; setOnClickListener { toggleRecording() } }
         barL = bar(); barR = bar()
         textL = label("L  --"); textR = label("R  --")
+        rotationText = label("向き --").apply { textSize = 14f }
         info = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = 11f; setTextIsSelectable(true) }
 
         setContentView(LinearLayout(this).apply {
@@ -119,6 +127,7 @@ class RecordActivity : Activity() {
             addView(group)
             addView(swapBox)
             addView(startButton)
+            addView(rotationText)
             addView(textL); addView(barL)
             addView(textR); addView(barR)
             addView(recButton)
@@ -197,6 +206,8 @@ class RecordActivity : Activity() {
             } catch (e: Throwable) {
                 ui.post { info.text = "エラー: $e" }
             } finally {
+                for (e in effects) e.release()
+                effects.clear()
                 rec.release()
                 ui.post { captureEnded() }
             }
@@ -205,6 +216,8 @@ class RecordActivity : Activity() {
 
     private fun describe(rec: AudioRecord, sourceName: String): String {
         val sb = StringBuilder("入力元 $sourceName  チャンネル=${rec.channelCount}\n")
+        sb.append(disableEffects(rec))
+        sb.append("向き: ${rotationName()}\n")
         sb.append("経路: ${rec.routedDevice?.let { it.productName.toString() + " (type" + it.type + ")" } ?: "(不明)"}\n")
         try {
             val active = rec.activeMicrophones
@@ -218,7 +231,43 @@ class RecordActivity : Activity() {
 
     private fun db(v: Double) = if (v > 1e-9) 20 * log10(v) else -180.0
 
+    private fun rotationName(): String = when (windowManager.defaultDisplay.rotation) {
+        Surface.ROTATION_0 -> "縦 (0°)"
+        Surface.ROTATION_90 -> "横 (90°: 本体の上端が左、下端が右)"
+        Surface.ROTATION_180 -> "縦逆さ (180°)"
+        else -> "横 (270°: 本体の上端が右、下端が左)"
+    }
+
+    /** Asks the platform for each effect on this recording session and tries to switch it off. Returns what happened. */
+    private fun disableEffects(rec: AudioRecord): String {
+        for (e in effects) e.release()
+        effects.clear()
+        val sb = StringBuilder("端末側のエフェクト:\n")
+        val kinds = listOf(
+            Triple("自動音量調整 (AGC)", AutomaticGainControl.isAvailable()) { AutomaticGainControl.create(rec.audioSessionId) as AudioEffect? },
+            Triple("ノイズ抑制 (NS)", NoiseSuppressor.isAvailable()) { NoiseSuppressor.create(rec.audioSessionId) as AudioEffect? },
+            Triple("エコー除去 (AEC)", AcousticEchoCanceler.isAvailable()) { AcousticEchoCanceler.create(rec.audioSessionId) as AudioEffect? },
+        )
+        for ((name, available, make) in kinds) {
+            if (!available) {
+                sb.append("  $name: この端末には無い\n")
+                continue
+            }
+            val e = make()
+            if (e == null) {
+                sb.append("  $name: あるが作れない\n")
+                continue
+            }
+            val before = e.enabled
+            val code = e.setEnabled(false)
+            sb.append("  $name: 既定=${if (before) "有効" else "無効"} → 無効にする結果=${if (code == AudioEffect.SUCCESS) "成功" else "失敗($code)"} 今=${if (e.enabled) "有効" else "無効"}\n")
+            effects.add(e)
+        }
+        return sb.toString()
+    }
+
     private fun meters(pl: Double, pr: Double) {
+        rotationText.text = "向き: " + rotationName()
         val now = System.currentTimeMillis()
         if (now - holdAt > 1500) { holdL = pl; holdR = pr; holdAt = now } // the held peak is renewed every 1.5 s
         if (pl > holdL) holdL = pl

@@ -17,6 +17,8 @@
         </activity>
         <activity
             android:name=".RecordActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:screenOrientation="sensorLandscape"
             android:exported="false" />
     </application>
 
