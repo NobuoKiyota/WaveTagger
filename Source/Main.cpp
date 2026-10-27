@@ -2669,6 +2669,324 @@ private:
             check (r16.written == 1 && bits == 16 && std::abs (db (samplePeak (s16)) - (-1.0)) < 0.01, "16-bit export (with dither) works and still lands on the target");
         }
 
+        // ---- repairs: de-clip, de-click, de-wind, de-noise (Restoration)
+        {
+            const double sr = 48000.0;
+            juce::Random rnd (4242);
+            const auto uniform = [&] (double rmsLevel) { return (rnd.nextFloat() * 2.0f - 1.0f) * (float) (rmsLevel * std::sqrt (3.0)); };
+            const auto rmsCh = [] (const juce::AudioBuffer<float>& b, int ch, int from, int to) {
+                double s = 0.0;
+                for (int i = from; i < to; ++i)
+                    s += (double) b.getSample (ch, i) * b.getSample (ch, i);
+                return std::sqrt (s / (to - from));
+            };
+            const auto tone = [&] (const juce::AudioBuffer<float>& b, int ch, double hz, int from, int to) { // amplitude of one frequency
+                double sa = 0.0, ca = 0.0;
+                for (int i = from; i < to; ++i)
+                {
+                    sa += (double) b.getSample (ch, i) * std::sin (2.0 * pi * hz * i / sr);
+                    ca += (double) b.getSample (ch, i) * std::cos (2.0 * pi * hz * i / sr);
+                }
+                return 2.0 * std::sqrt (sa * sa + ca * ca) / (to - from);
+            };
+            const auto chord = [&] (int channels, double seconds) {
+                juce::AudioBuffer<float> b (channels, (int) (sr * seconds));
+                for (int ch = 0; ch < channels; ++ch)
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                    {
+                        const auto t = i / sr;
+                        const auto v = 0.2 * std::sin (2.0 * pi * 220.0 * t) + 0.15 * std::sin (2.0 * pi * 330.0 * t) + 0.1 * std::sin (2.0 * pi * 495.0 * t);
+                        b.setSample (ch, i, (float) (ch == 0 ? v : 0.8 * v));
+                    }
+                return b;
+            };
+
+            // every repair is part of "needs stage A", and none of them touches a recording that is silent or far too short
+            for (int which = 0; which < 4; ++which)
+            {
+                ConditionOptions one;
+                one.declip = which == 0;
+                one.declick = which == 1 ? Strength::high : Strength::off;
+                one.dewind = which == 2 ? Strength::high : Strength::off;
+                one.denoise = which == 3 ? Strength::high : Strength::off;
+                juce::AudioBuffer<float> silent (2, (int) (sr * 3.0));
+                silent.clear();
+                juce::AudioBuffer<float> brief (2, 200);
+                for (int i = 0; i < 200; ++i)
+                    for (int ch = 0; ch < 2; ++ch)
+                        brief.setSample (ch, i, uniform (0.1));
+                const auto silentBefore = silent, briefBefore = brief;
+                ConditionReport r;
+                conditionFile (silent, sr, one, r);
+                conditionFile (brief, sr, one, r);
+                check (one.needsFile() && identical (silent, silentBefore) && identical (brief, briefBefore),
+                       which == 0 ? "de-clip: needs stage A; silence and a few samples stay bit-exact"
+                       : which == 1 ? "de-click: needs stage A; silence and a few samples stay bit-exact"
+                       : which == 2 ? "de-wind: needs stage A; silence and a few samples stay bit-exact"
+                                    : "de-noise: needs stage A; silence and a few samples stay bit-exact");
+            }
+
+            // ---- de-clip
+            {
+                const auto clean = sine (1, sr, 2.0, 440.0, 0.9);
+                auto clipped = clean;
+                for (int i = 0; i < clipped.getNumSamples(); ++i)
+                    clipped.setSample (0, i, juce::jlimit (-0.5f, 0.5f, clipped.getSample (0, i)));
+                auto fixed = clipped;
+                const auto r = declip (fixed);
+                double err = 0.0, ref = 0.0;
+                for (int i = 100; i < clean.getNumSamples() - 100; ++i)
+                {
+                    const double d = (double) fixed.getSample (0, i) - clean.getSample (0, i);
+                    err += d * d;
+                    ref += (double) clean.getSample (0, i) * clean.getSample (0, i);
+                }
+                check (r.runs > 100 && r.gainDb == 0.0 && db (std::sqrt (err / ref)) < -30.0 && samplePeak (fixed) > 0.85f,
+                       "de-clip rebuilds the flat tops (error under -30 dB, peaks come back, nothing is lowered)");
+
+                auto untouched = clean;
+                check (declip (untouched).runs == 0 && identical (untouched, clean), "de-clip leaves a signal that is not clipped alone");
+
+                auto few = sine (1, sr, 1.0, 50.0, 0.3);
+                for (int i = 0; i < 6; ++i)
+                {
+                    few.setSample (0, 1000 + i, 0.9f);
+                    few.setSample (0, 3000 + i, 0.9f);
+                }
+                const auto fewBefore = few;
+                check (declip (few).runs == 0 && identical (few, fewBefore), "de-clip: two flat tops are a loud sound, not clipping");
+
+                auto loud = sine (1, sr, 2.0, 440.0, 1.5);
+                for (int i = 0; i < loud.getNumSamples(); ++i)
+                    loud.setSample (0, i, juce::jlimit (-1.0f, 1.0f, loud.getSample (0, i)));
+                const auto rl = declip (loud);
+                check (rl.runs > 100 && rl.gainDb < -2.5 && rl.gainDb > -4.5 && samplePeak (loud) <= 1.0f,
+                       "de-clip of a full-scale clip lowers the whole recording so the rebuilt peaks fit under 0 dBFS");
+            }
+
+            // ---- de-click
+            {
+                const auto clean = chord (2, 3.0);
+                auto dirty = clean;
+                std::vector<int> positions;
+                for (int k = 0; k < 20; ++k)
+                {
+                    const auto p = 12000 + k * 6500;
+                    positions.push_back (p);
+                    const auto width = k % 3 == 0 ? 3 : 1;
+                    for (int w = 0; w < width; ++w)
+                        dirty.setSample (0, p + w, dirty.getSample (0, p + w) + (k % 2 == 0 ? 0.5f : -0.4f));
+                }
+                auto fixed = dirty;
+                const auto r = declick (fixed, sr, Strength::medium);
+                float worst = 0.0f;
+                bool restOk = true;
+                for (int i = 0; i < clean.getNumSamples(); ++i)
+                {
+                    bool near = false;
+                    for (const auto p : positions)
+                        near = near || (i >= p - 12 && i <= p + 14);
+                    if (near)
+                        worst = juce::jmax (worst, std::abs (fixed.getSample (0, i) - clean.getSample (0, i)));
+                    else
+                        restOk = restOk && fixed.getSample (0, i) == dirty.getSample (0, i);
+                    restOk = restOk && fixed.getSample (1, i) == dirty.getSample (1, i);
+                }
+                check (r.regions == 20 && ! r.tooMany && worst < 0.01f, "de-click repairs 20 spikes (1 and 3 samples wide) on a chord to within 0.01");
+                check (restOk, "de-click changes nothing outside the spikes (and nothing on the other channel)");
+
+                juce::AudioBuffer<float> hit (1, (int) (3 * sr));
+                for (int i = 0; i < hit.getNumSamples(); ++i)
+                {
+                    const auto t = i / sr;
+                    hit.setSample (0, i, t < 1.0 ? uniform (0.0003) : uniform (0.3) * (float) std::exp (-(t - 1.0) / 0.3));
+                }
+                auto hitCopy = hit;
+                const auto rh = declick (hitCopy, sr, Strength::high);
+                check (rh.regions == 0 && identical (hitCopy, hit), "de-click does not touch a real attack (a loud sound that starts suddenly)");
+
+                auto crackly = chord (2, 3.0);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < crackly.getNumSamples(); ++i)
+                        if (rnd.nextFloat() < 0.02f)
+                            crackly.setSample (ch, i, crackly.getSample (ch, i) + (rnd.nextBool() ? 0.3f : -0.3f));
+                auto crackleCopy = crackly;
+                const auto rc = declick (crackleCopy, sr, Strength::medium);
+                check (rc.tooMany && rc.regions == 0 && identical (crackleCopy, crackly), "de-click gives up when 2 % of the recording looks like clicks (that is the sound, not damage)");
+            }
+
+            // ---- de-wind
+            {
+                const auto length = (int) (8 * sr);
+                const auto lowNoise = [&] (double level, int start, int end) { // two one-pole low-passes at 100 Hz, ramped at the ends
+                    std::vector<float> v ((size_t) length, 0.0f);
+                    double y1 = 0.0, y2 = 0.0, sum = 0.0;
+                    for (int i = start; i < end; ++i)
+                    {
+                        y1 += 0.0131 * (uniform (1.0) - y1);
+                        y2 += 0.0131 * (y1 - y2);
+                        v[(size_t) i] = (float) y2;
+                        sum += y2 * y2;
+                    }
+                    const auto scale = level / std::sqrt (sum / (end - start));
+                    for (int i = start; i < end; ++i)
+                    {
+                        const auto ramp = juce::jmin (1.0, juce::jmin (i - start, end - i) / (0.2 * sr));
+                        v[(size_t) i] = (float) (v[(size_t) i] * scale * ramp);
+                    }
+                    return v;
+                };
+                const auto lowPassed = [&] (const juce::AudioBuffer<float>& b, int from, int to) {
+                    double y1 = 0.0, y2 = 0.0, sum = 0.0;
+                    for (int i = 0; i < to; ++i)
+                    {
+                        y1 += 0.0131 * (b.getSample (0, i) - y1);
+                        y2 += 0.0131 * (y1 - y2);
+                        if (i >= from)
+                            sum += y2 * y2;
+                    }
+                    return std::sqrt (sum / (to - from));
+                };
+
+                juce::AudioBuffer<float> windy (2, length);
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    const auto wind = lowNoise (0.1, (int) (2.0 * sr), (int) (4.0 * sr));
+                    for (int i = 0; i < length; ++i)
+                        windy.setSample (ch, i, (float) (0.1 * std::sin (2.0 * pi * 2000.0 * i / sr) + 0.05 * std::sin (2.0 * pi * 3000.0 * i / sr))
+                                                    + uniform (0.0003) + wind[(size_t) i]);
+                }
+
+                auto treated = windy;
+                const auto r = dewind (treated, sr, Strength::medium);
+                const auto from = (int) (2.5 * sr), to = (int) (3.5 * sr);
+                const auto reduction = db (lowPassed (windy, from, to)) - db (lowPassed (treated, from, to));
+                check (r.frames > 100 && reduction > 9.0, "de-wind takes the rumble of a 2-second gust down by more than 9 dB");
+                check (std::abs (db (tone (treated, 0, 2000.0, from, to)) - db (tone (windy, 0, 2000.0, from, to))) < 0.1
+                           && std::abs (db (tone (treated, 1, 3000.0, from, to)) - db (tone (windy, 1, 3000.0, from, to))) < 0.1,
+                       "de-wind keeps the 2 kHz and 3 kHz content within 0.1 dB");
+                float quietDiff = 0.0f;
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = (int) (4.8 * sr); i < length - (int) (0.3 * sr); ++i)
+                        quietDiff = juce::jmax (quietDiff, std::abs (treated.getSample (ch, i) - windy.getSample (ch, i)));
+                check (quietDiff < 1.0e-4f, "de-wind leaves the stretch after the gust as it was");
+
+                juce::AudioBuffer<float> boom (2, length);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < length; ++i)
+                    {
+                        const auto inBurst = i >= (int) (3.0 * sr) && i < (int) (3.2 * sr);
+                        boom.setSample (ch, i, (float) (inBurst ? 0.5 * std::sin (2.0 * pi * 60.0 * i / sr) : 0.0) + uniform (0.0003));
+                    }
+                auto boomCopy = boom;
+                check (dewind (boomCopy, sr, Strength::high).frames == 0 && identical (boomCopy, boom), "de-wind does not touch a short bass hit (0.2 s)");
+            }
+
+            // ---- de-noise
+            {
+                const auto length = (int) (8 * sr);
+                juce::AudioBuffer<float> hissy (2, length);
+                for (int i = 0; i < length; ++i)
+                {
+                    const auto t = i / sr;
+                    const auto sound = (t >= 2.0 && t < 3.0) || (t >= 5.0 && t < 6.0) ? 0.3 * std::sin (2.0 * pi * 440.0 * t) : 0.0;
+                    hissy.setSample (0, i, (float) sound + uniform (0.01));
+                    hissy.setSample (1, i, (float) (0.5 * sound) + uniform (0.01));
+                }
+
+                auto cleaned = hissy;
+                const auto r = denoise (cleaned, sr, Strength::medium);
+                const auto floorFrom = (int) (6.5 * sr), floorTo = length;
+                const auto reduction = db (rmsCh (hissy, 0, floorFrom, floorTo)) - db (rmsCh (cleaned, 0, floorFrom, floorTo));
+                check (r.outcome == DenoiseOutcome::applied && std::abs (r.floorDb - (-40.0)) < 1.5, "de-noise finds the noise floor (about -40 dBFS)");
+                check (reduction > 8.0 && reduction < 14.0, "de-noise (medium) lowers the noise between the sounds by about 12 dB");
+                const auto soundFrom = (int) (2.2 * sr), soundTo = (int) (2.8 * sr);
+                check (std::abs (db (tone (cleaned, 0, 440.0, soundFrom, soundTo)) - db (tone (hissy, 0, 440.0, soundFrom, soundTo))) < 0.5,
+                       "de-noise keeps the sound itself (within 0.5 dB)");
+                const auto ratioBefore = db (tone (hissy, 0, 440.0, soundFrom, soundTo)) - db (tone (hissy, 1, 440.0, soundFrom, soundTo));
+                const auto ratioAfter = db (tone (cleaned, 0, 440.0, soundFrom, soundTo)) - db (tone (cleaned, 1, 440.0, soundFrom, soundTo));
+                check (std::abs (ratioBefore - ratioAfter) < 0.2, "de-noise applies one gain to both channels (the left/right balance of a sound stays)");
+                check (cleaned.getNumSamples() == length && std::abs (db (rmsCh (cleaned, 0, 0, (int) (0.5 * sr))) - db (rmsCh (cleaned, 0, floorFrom, floorTo))) < 3.0,
+                       "de-noise: length is unchanged and the start of the recording is treated like the rest");
+
+                juce::AudioBuffer<float> steady (2, (int) (5 * sr));
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < steady.getNumSamples(); ++i)
+                        steady.setSample (ch, i, uniform (0.05));
+                auto steadyCopy = steady;
+                const auto rs = denoise (steadyCopy, sr, Strength::high);
+                check (rs.outcome == DenoiseOutcome::noFloor && identical (steadyCopy, steady), "de-noise does nothing when the whole recording is steady noise (rain, machinery)");
+
+                juce::AudioBuffer<float> shortOne (1, (int) (0.5 * sr));
+                for (int i = 0; i < shortOne.getNumSamples(); ++i)
+                    shortOne.setSample (0, i, uniform (0.05));
+                auto shortCopy = shortOne;
+                check (denoise (shortCopy, sr, Strength::high).outcome == DenoiseOutcome::tooShort && identical (shortCopy, shortOne), "de-noise does nothing on a recording shorter than a second");
+
+                juce::AudioBuffer<float> beep (1, (int) (4 * sr));
+                beep.clear();
+                for (int i = (int) sr; i < (int) (1.5 * sr); ++i)
+                    beep.setSample (0, i, (float) (0.3 * std::sin (2.0 * pi * 440.0 * i / sr)));
+                auto beepCopy = beep;
+                check (denoise (beepCopy, sr, Strength::high).outcome == DenoiseOutcome::noFloor && identical (beepCopy, beep), "de-noise does nothing when the quiet part is digital silence");
+
+                for (const auto strength : { Strength::low, Strength::medium, Strength::high })
+                {
+                    auto t = hissy;
+                    denoise (t, sr, strength);
+                    const auto red = db (rmsCh (hissy, 0, floorFrom, floorTo)) - db (rmsCh (t, 0, floorFrom, floorTo));
+                    const auto expected = strength == Strength::low ? 6.0 : strength == Strength::medium ? 12.0 : 18.0;
+                    check (red > expected * 0.6 && red < expected + 2.0, strength == Strength::low ? "de-noise low: about 6 dB"
+                                                                         : strength == Strength::medium ? "de-noise medium: about 12 dB"
+                                                                                                         : "de-noise high: about 18 dB");
+                }
+            }
+
+            // ---- the whole chain, the settings, the comment
+            {
+                ConditionOptions all;
+                all.declip = true;
+                all.declick = Strength::medium;
+                all.dewind = Strength::low;
+                all.denoise = Strength::medium;
+                auto b = chord (2, 4.0);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                    {
+                        const auto t = i / sr;
+                        b.setSample (ch, i, (t > 1.5 && t < 2.5 ? b.getSample (ch, i) : 0.0f) + uniform (0.01));
+                    }
+                ConditionReport rep2;
+                const auto length = b.getNumSamples();
+                conditionFile (b, sr, all, rep2);
+                const auto comment = describeConditioning (all, rep2);
+                check (b.getNumSamples() == length && comment.contains ("declip=none") && comment.contains ("declick=") && comment.contains ("dewind=")
+                           && comment.contains ("denoise=") && rep2.denoiseOutcome == DenoiseOutcome::applied && rep2.denoiseAvgDb < -3.0,
+                       "all four repairs together: they run, are reported, and are named in the WAV comment");
+
+                ConditionSettings s;
+                s.options = all;
+                s.preset = ConditionPreset::custom;
+                const auto back = conditionSettingsFromVar (conditionSettingsToVar (s));
+                check (back.options == all && back == s, "the repair settings survive a save and a load");
+
+                juce::DynamicObject::Ptr old (new juce::DynamicObject());
+                old->setProperty ("preset", "custom");
+                old->setProperty ("dcRemove", true);
+                const auto oldRead = conditionSettingsFromVar (juce::var (old.get()));
+                juce::DynamicObject::Ptr odd (new juce::DynamicObject());
+                odd->setProperty ("preset", "custom");
+                odd->setProperty ("denoise", "loud");
+                odd->setProperty ("declick", 7);
+                const auto oddRead = conditionSettingsFromVar (juce::var (odd.get()));
+                check (! oldRead.options.declip && oldRead.options.denoise == Strength::off && oldRead.options.dewind == Strength::off && oldRead.options.declick == Strength::off
+                           && oddRead.options.denoise == Strength::off && oddRead.options.declick == Strength::off,
+                       "settings saved before the repairs existed (or with unknown names) read as off");
+                check (presetOptions (ConditionPreset::standard).denoise == Strength::off && ! presetOptions (ConditionPreset::standard).declip,
+                       "the standard preset does not switch the repairs on");
+            }
+        }
+
         return ok;
     }
 

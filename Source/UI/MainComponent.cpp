@@ -624,6 +624,7 @@ void MainComponent::showConditioning()
         hooks.changed = [this] (const ConditionSettings& s) { setConditioning (s); };
         hooks.humStatus = [this] { return humStatusText(); };
         hooks.panStatus = [this] { return panStatusText(); };
+        hooks.cleanStatus = [this] { return cleanStatusText(); };
         hooks.selectionInfo = [this] { return selectionGainText(); };
         conditioningWindow = std::make_unique<ConditioningWindow> (conditioning, std::move (hooks));
     }
@@ -666,6 +667,42 @@ juce::String MainComponent::panStatusText() const
         case PanOutcome::tooShort:   break;
     }
     return WT_U8 ("音のある部分が足りないため判定できません (補正しません)");
+}
+
+/** One line per repair that is on, from the report of the conditioned copy (which exists once B has been switched on). */
+static juce::String repairLines (const ConditionOptions& o, const ConditionReport& r, const juce::String& separator)
+{
+    juce::StringArray lines;
+    if (o.declip)
+        lines.add (r.declipRuns > 0 ? WT_U8 ("クリップ ") + juce::String (r.declipRuns) + WT_U8 (" か所を復元")
+                                          + (r.declipGainDb < -0.05 ? WT_U8 (" (全体を ") + juce::String (r.declipGainDb, 1) + " dB)" : juce::String())
+                                    : WT_U8 ("クリップは見つからないため何もしません"));
+    if (o.declick != Strength::off)
+        lines.add (r.clicksTooMany ? WT_U8 ("プチ: 多すぎて音の一部と思われるため何もしません")
+                                   : r.clicksFixed > 0 ? WT_U8 ("プチ ") + juce::String (r.clicksFixed) + WT_U8 (" か所を修復")
+                                                       : WT_U8 ("プチは見つかりません"));
+    if (o.dewind != Strength::off)
+        lines.add (r.windFrames > 0 ? WT_U8 ("風: ") + juce::String (r.windFrames / 100.0, 1) + WT_U8 (" 秒分を軽減 (最大 ") + juce::String (r.windMaxCutoffHz, 0) + " Hz)"
+                                    : WT_U8 ("風ノイズは見つかりません"));
+    if (o.denoise != Strength::off)
+    {
+        switch (r.denoiseOutcome)
+        {
+            case DenoiseOutcome::applied:  lines.add (WT_U8 ("ノイズ床 ") + juce::String (r.noiseFloorDb, 0) + WT_U8 (" dBFS、平均 ") + juce::String (r.denoiseAvgDb, 1) + " dB"); break;
+            case DenoiseOutcome::noFloor:  lines.add (WT_U8 ("静かな部分がない (音そのものが定常) ため、ノイズ除去はしません")); break;
+            case DenoiseOutcome::tooShort: lines.add (WT_U8 ("1 秒未満のため、ノイズ除去はしません")); break;
+        }
+    }
+    return lines.joinIntoString (separator);
+}
+
+juce::String MainComponent::cleanStatusText() const
+{
+    if (audio == nullptr)
+        return WT_U8 ("(録音を開くと表示します)");
+    if (conditionPreview.getProcessed() == nullptr)
+        return WT_U8 ("B キー (A/B 試聴) を押すと、この録音での結果がここに出ます");
+    return repairLines (conditioning.options, conditionPreview.getFileReport(), " / ");
 }
 
 juce::String MainComponent::selectionGainText()
@@ -738,6 +775,15 @@ juce::String MainComponent::conditioningSummary() const
         parts.add (WT_U8 ("ハム除去 (") + (o.humMode == HumMode::automatic ? WT_U8 ("自動") : o.humMode == HumMode::mains50 ? "50 Hz" : "60 Hz") + ")");
     if (o.lowCutHz > 0.0f)
         parts.add (WT_U8 ("ローカット ") + juce::String (o.lowCutHz, 0) + " Hz");
+    const auto strengthName = [] (Strength s) { return s == Strength::low ? WT_U8 ("弱") : s == Strength::medium ? WT_U8 ("標準") : WT_U8 ("強"); };
+    if (o.declip)
+        parts.add (WT_U8 ("クリップ復元"));
+    if (o.declick != Strength::off)
+        parts.add (WT_U8 ("プチ除去 (") + strengthName (o.declick) + ")");
+    if (o.dewind != Strength::off)
+        parts.add (WT_U8 ("風ノイズ (") + strengthName (o.dewind) + ")");
+    if (o.denoise != Strength::off)
+        parts.add (WT_U8 ("ノイズ除去 (") + strengthName (o.denoise) + ")");
     if (o.panMode != PanMode::off)
         parts.add (WT_U8 ("L/R バランス"));
     if (o.normalize == NormalizeMode::peak)
@@ -1572,6 +1618,8 @@ void MainComponent::startExport()
                                               lines.add (result.panApplied ? WT_U8 ("L/R バランス: ") + juce::String (result.panDb >= 0 ? "L" : "R") + WT_U8 (" が ") + juce::String (std::abs (result.panDb), 1)
                                                                                  + WT_U8 (" dB 大きかったので ±") + juce::String (std::abs (result.panDb) * 0.5, 1) + WT_U8 (" dB ずつ補正")
                                                                            : WT_U8 ("L/R バランスは補正が要らない(または補正できない)ため、何もしていません"));
+                                          if (options.declip || options.declick != Strength::off || options.dewind != Strength::off || options.denoise != Strength::off)
+                                              lines.add (repairLines (options, result.fileReport, "\n"));
                                           if (options.normalize != NormalizeMode::off)
                                           {
                                               const auto sign = [] (double v) { return juce::String (v >= 0 ? "+" : "") + juce::String (v, 1); };

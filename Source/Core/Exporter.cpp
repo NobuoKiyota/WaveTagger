@@ -76,6 +76,7 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
         result.humNotches = fileReport.humNotches;
         result.panApplied = fileReport.panApplied;
         result.panDb = fileReport.panDb;
+        result.fileReport = fileReport;
     }
 
     bool firstGain = true;
@@ -114,6 +115,15 @@ ExportResult exportCycles (const AudioData& audio, const std::vector<ExportItem>
         report.humNotches = fileReport.humNotches;
         report.panApplied = fileReport.panApplied;
         report.panDb = fileReport.panDb;
+        report.declipRuns = fileReport.declipRuns;
+        report.declipGainDb = fileReport.declipGainDb;
+        report.clicksFixed = fileReport.clicksFixed;
+        report.clicksTooMany = fileReport.clicksTooMany;
+        report.windFrames = fileReport.windFrames;
+        report.windMaxCutoffHz = fileReport.windMaxCutoffHz;
+        report.denoiseOutcome = fileReport.denoiseOutcome;
+        report.noiseFloorDb = fileReport.noiseFloorDb;
+        report.denoiseAvgDb = fileReport.denoiseAvgDb;
         if (conditioning.normalize != NormalizeMode::off)
         {
             result.minGainDb = firstGain ? report.gainDb : juce::jmin (result.minGainDb, report.gainDb);

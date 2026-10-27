@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Restoration.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 
 namespace wt
@@ -30,6 +31,12 @@ struct ConditionOptions
 {
     bool dcRemove = false;
 
+    // repairs (Restoration.h): all off by default; the strength is how eager they are, never a promise that something is done
+    bool declip = false;
+    Strength declick = Strength::off;
+    Strength dewind = Strength::off;
+    Strength denoise = Strength::off;
+
     HumMode humMode = HumMode::off;
     int humHarmonics = 8;           // harmonics 1..N of the mains frequency are examined
     double humProminenceDb = 10.0;  // a harmonic counts if it stands this far above its neighbourhood
@@ -53,13 +60,26 @@ struct ConditionOptions
     bool operator== (const ConditionOptions&) const = default;
 
     /** Stage A: needs the whole recording (filters need run-up, so they run before cutting). */
-    bool needsFile() const { return dcRemove || humMode != HumMode::off || lowCutHz > 0.0f || panMode != PanMode::off; }
+    bool needsFile() const
+    {
+        return dcRemove || declip || declick != Strength::off || dewind != Strength::off || denoise != Strength::off
+               || humMode != HumMode::off || lowCutHz > 0.0f || panMode != PanMode::off;
+    }
     bool active() const { return needsFile() || normalize != NormalizeMode::off; }
 };
 
 struct ConditionReport
 {
     double dcOffset = 0.0; // largest per-channel mean that was removed
+    int declipRuns = 0;       // flat tops rebuilt
+    double declipGainDb = 0.0;
+    int clicksFixed = 0;      // spikes repaired
+    bool clicksTooMany = false;
+    int windFrames = 0;       // analysis frames in which wind was attenuated
+    double windMaxCutoffHz = 0.0;
+    DenoiseOutcome denoiseOutcome = DenoiseOutcome::tooShort; // only meaningful when denoise is on
+    double noiseFloorDb = -240.0;
+    double denoiseAvgDb = 0.0;
     double humHz = 0.0;    // 50 or 60 when hum was found and notched, otherwise 0
     int humNotches = 0;
     bool panApplied = false;
@@ -103,7 +123,7 @@ struct PanDetection
     only those well above the noise floor (so a lopsided floor does not either). Never modifies the buffer. */
 PanDetection detectPanBalance (const juce::AudioBuffer<float>& buffer, double sampleRate, const ConditionOptions& options);
 
-/** Stage A, in place: DC removal, hum notches, low cut, then left/right balance. The length never changes. */
+/** Stage A, in place: DC removal, de-clip, de-click, hum notches, low cut, de-wind, de-noise, then left/right balance. The length never changes. */
 void conditionFile (juce::AudioBuffer<float>& buffer, double sampleRate, const ConditionOptions& options, ConditionReport& report);
 
 /** Stage B, in place, on one already-cut cycle: normalisation. */

@@ -15,6 +15,7 @@ public:
         std::function<void (const ConditionSettings&)> changed;
         std::function<juce::String()> humStatus;     // e.g. "60 Hz (4 harmonics)" / "none" / "looking..."
         std::function<juce::String()> panStatus;     // what the left/right balance of this recording is and what is done about it
+        std::function<juce::String()> cleanStatus;   // what the repairs (de-clip / de-click / de-wind / de-noise) make of this recording
         std::function<juce::String()> selectionInfo; // gain for the cycle that is selected
     };
 
@@ -39,8 +40,9 @@ private:
     bool updating = false;
 
     juce::Label presetLabel, humLabel, panLabel, panStatusLabel, cutLabel, cutHzLabel, normLabel, targetLabel, ceilingLabel, humStatusLabel, selectionLabel, noteLabel;
-    juce::ComboBox presetBox, humBox, panBox, cutOrderBox, normBox;
-    juce::ToggleButton dcToggle, cutToggle, ditherToggle, gainToggle;
+    juce::Label declickLabel, dewindLabel, denoiseLabel, cleanStatusLabel;
+    juce::ComboBox presetBox, humBox, panBox, cutOrderBox, normBox, declickBox, dewindBox, denoiseBox;
+    juce::ToggleButton dcToggle, cutToggle, ditherToggle, gainToggle, declipToggle;
     juce::TextEditor cutHz, target, ceiling;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ConditioningPanel)

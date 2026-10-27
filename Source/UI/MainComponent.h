@@ -140,6 +140,7 @@ private:
     juce::String conditioningSummary() const;
     juce::String humStatusText() const;
     juce::String panStatusText() const;
+    juce::String cleanStatusText() const;
     juce::String selectionGainText();
     void applySharedPreferences (const juce::var& prefs);
     void chooseCategory (const juce::String& name);

@@ -35,6 +35,9 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
     label (presetLabel, WT_U8 ("プリセット"));
     label (humLabel, WT_U8 ("ハム除去"));
     label (panLabel, WT_U8 ("L/R バランス"));
+    label (declickLabel, WT_U8 ("プチノイズ除去"));
+    label (dewindLabel, WT_U8 ("風ノイズ軽減"));
+    label (denoiseLabel, WT_U8 ("ヒス・ノイズ除去"));
     label (normLabel, WT_U8 ("ノーマライズ"));
     label (targetLabel, WT_U8 ("目標"));
     label (ceilingLabel, WT_U8 ("ピークの上限 (dBFS)"));
@@ -54,12 +57,22 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
     normBox.addItem (WT_U8 ("オフ"), 1);
     normBox.addItem (WT_U8 ("Peak (dBFS)"), 2);
     normBox.addItem (WT_U8 ("LUFS (ラウドネス)"), 3);
-    for (auto* b : { &presetBox, &humBox, &panBox, &cutOrderBox, &normBox })
+    for (auto* b : { &declickBox, &dewindBox, &denoiseBox })
+    {
+        b->addItem (WT_U8 ("オフ"), 1);
+        b->addItem (WT_U8 ("弱"), 2);
+        b->addItem (WT_U8 ("標準"), 3);
+        b->addItem (WT_U8 ("強"), 4);
+    }
+    for (auto* b : { &presetBox, &humBox, &panBox, &cutOrderBox, &normBox, &declickBox, &dewindBox, &denoiseBox })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
     }
 
+    declipToggle.setButtonText (WT_U8 ("クリップ (音割れ) を復元"));
+    declipToggle.setWantsKeyboardFocus (false);
+    addAndMakeVisible (declipToggle);
     dcToggle.setButtonText (WT_U8 ("DC オフセットを除去"));
     cutToggle.setButtonText (WT_U8 ("ローカット"));
     ditherToggle.setButtonText (WT_U8 ("16bit 書き出し時にディザを掛ける"));
@@ -78,22 +91,24 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
 
     humStatusLabel.setColour (juce::Label::textColourId, theme::accent);
     panStatusLabel.setColour (juce::Label::textColourId, theme::accent);
+    cleanStatusLabel.setColour (juce::Label::textColourId, theme::accent);
+    cleanStatusLabel.setMinimumHorizontalScale (1.0f);
     selectionLabel.setColour (juce::Label::textColourId, theme::text);
     noteLabel.setColour (juce::Label::textColourId, theme::textDim);
     noteLabel.setFont (juce::FontOptions (12.0f));
     noteLabel.setMinimumHorizontalScale (1.0f);
     noteLabel.setText (WT_U8 ("A/B 試聴は B キー (ツールバーの「B: 整音後」)。元の録音は変更せず、書き出すファイルにだけ掛けます。"),
                        juce::dontSendNotification);
-    for (auto* l : { &humStatusLabel, &panStatusLabel, &selectionLabel, &noteLabel })
+    for (auto* l : { &humStatusLabel, &panStatusLabel, &cleanStatusLabel, &selectionLabel, &noteLabel })
         addAndMakeVisible (l);
 
     presetBox.onChange = [this] {
         if (! updating)
             applyPreset();
     };
-    for (auto* b : { &humBox, &panBox, &cutOrderBox, &normBox })
+    for (auto* b : { &humBox, &panBox, &cutOrderBox, &normBox, &declickBox, &dewindBox, &denoiseBox })
         b->onChange = [this] { edited(); };
-    for (auto* t : { &dcToggle, &cutToggle, &ditherToggle, &gainToggle })
+    for (auto* t : { &dcToggle, &cutToggle, &ditherToggle, &gainToggle, &declipToggle })
         t->onClick = [this] { edited(); };
     for (auto* e : { &cutHz, &target, &ceiling })
     {
@@ -102,7 +117,7 @@ ConditioningPanel::ConditioningPanel (const ConditionSettings& initial, Hooks h)
     }
 
     showSettings();
-    setSize (520, 478);
+    setSize (520, 650);
 }
 
 void ConditioningPanel::setSettings (const ConditionSettings& s)
@@ -120,6 +135,10 @@ void ConditioningPanel::showSettings()
     dcToggle.setToggleState (o.dcRemove, juce::dontSendNotification);
     humBox.setSelectedId ((int) o.humMode + 1, juce::dontSendNotification);
     panBox.setSelectedId ((int) o.panMode + 1, juce::dontSendNotification);
+    declipToggle.setToggleState (o.declip, juce::dontSendNotification);
+    declickBox.setSelectedId ((int) o.declick + 1, juce::dontSendNotification);
+    dewindBox.setSelectedId ((int) o.dewind + 1, juce::dontSendNotification);
+    denoiseBox.setSelectedId ((int) o.denoise + 1, juce::dontSendNotification);
     cutToggle.setToggleState (o.lowCutHz > 0.0f, juce::dontSendNotification);
     cutHz.setText (numberText (o.lowCutHz > 0.0f ? o.lowCutHz : 20.0), false);
     cutOrderBox.setSelectedId (o.lowCutOrder >= 4 ? 2 : 1, juce::dontSendNotification);
@@ -164,6 +183,10 @@ void ConditioningPanel::edited()
     o.dcRemove = dcToggle.getToggleState();
     o.humMode = (HumMode) (humBox.getSelectedId() - 1);
     o.panMode = (PanMode) (panBox.getSelectedId() - 1);
+    o.declip = declipToggle.getToggleState();
+    o.declick = (Strength) (declickBox.getSelectedId() - 1);
+    o.dewind = (Strength) (dewindBox.getSelectedId() - 1);
+    o.denoise = (Strength) (denoiseBox.getSelectedId() - 1);
     o.lowCutHz = cutToggle.getToggleState() ? (float) juce::jlimit (10.0, 500.0, cutHz.getText().getDoubleValue()) : 0.0f;
     o.lowCutOrder = cutOrderBox.getSelectedId() == 2 ? 4 : 2;
     o.normalize = (NormalizeMode) (normBox.getSelectedId() - 1);
@@ -187,6 +210,10 @@ void ConditioningPanel::updateReadouts()
                             juce::dontSendNotification);
     panStatusLabel.setText (settings.options.panMode == PanMode::off ? juce::String() : WT_U8 ("この録音: ") + (hooks.panStatus ? hooks.panStatus() : juce::String()),
                             juce::dontSendNotification);
+    const auto& o = settings.options;
+    const auto repairs = o.declip || o.declick != Strength::off || o.dewind != Strength::off || o.denoise != Strength::off;
+    cleanStatusLabel.setText (! repairs ? juce::String() : WT_U8 ("この録音: ") + (hooks.cleanStatus ? hooks.cleanStatus() : juce::String()),
+                              juce::dontSendNotification);
     selectionLabel.setText (hooks.selectionInfo ? hooks.selectionInfo() : juce::String(), juce::dontSendNotification);
 }
 
@@ -232,6 +259,20 @@ void ConditioningPanel::resized()
     cutHzLabel.setBounds (a.removeFromLeft (30).withTrimmedLeft (6));
     a.removeFromLeft (10);
     cutOrderBox.setBounds (a.removeFromLeft (110));
+
+    r.removeFromTop (8);
+    declipToggle.setBounds (row());
+    a = row();
+    declickLabel.setBounds (a.removeFromLeft (labelWidth));
+    declickBox.setBounds (a.removeFromLeft (110));
+    a = row();
+    dewindLabel.setBounds (a.removeFromLeft (labelWidth));
+    dewindBox.setBounds (a.removeFromLeft (110));
+    a = row();
+    denoiseLabel.setBounds (a.removeFromLeft (labelWidth));
+    denoiseBox.setBounds (a.removeFromLeft (110));
+    cleanStatusLabel.setBounds (row());
+    r.removeFromTop (8);
 
     a = row();
     normLabel.setBounds (a.removeFromLeft (labelWidth));

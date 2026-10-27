@@ -496,6 +496,20 @@ void conditionFile (juce::AudioBuffer<float>& buffer, double sampleRate, const C
     if (options.dcRemove)
         removeDc (buffer, report);
 
+    // flat tops and spikes are repaired before any filter spreads them
+    if (options.declip)
+    {
+        const auto r = declip (buffer);
+        report.declipRuns = r.runs;
+        report.declipGainDb = r.gainDb;
+    }
+    if (options.declick != Strength::off)
+    {
+        const auto r = declick (buffer, sampleRate, options.declick);
+        report.clicksFixed = r.regions;
+        report.clicksTooMany = r.tooMany;
+    }
+
     if (options.humMode != HumMode::off)
     {
         const auto hum = detectHum (buffer, sampleRate, options);
@@ -509,6 +523,20 @@ void conditionFile (juce::AudioBuffer<float>& buffer, double sampleRate, const C
 
     if (options.lowCutHz > 0.0f)
         lowCut (buffer, sampleRate, options.lowCutHz, options.lowCutOrder);
+
+    if (options.dewind != Strength::off)
+    {
+        const auto r = dewind (buffer, sampleRate, options.dewind);
+        report.windFrames = r.frames;
+        report.windMaxCutoffHz = r.maxCutoffHz;
+    }
+    if (options.denoise != Strength::off)
+    {
+        const auto r = denoise (buffer, sampleRate, options.denoise);
+        report.denoiseOutcome = r.outcome;
+        report.noiseFloorDb = r.floorDb;
+        report.denoiseAvgDb = r.averageReductionDb;
+    }
 
     if (options.panMode != PanMode::off)
     {
@@ -609,6 +637,7 @@ const char* const presetNames[] = { "off", "standard", "custom" };
 const char* const humNames[] = { "off", "auto", "50", "60" };
 const char* const panNames[] = { "off", "auto" };
 const char* const normalizeNames[] = { "off", "peak", "lufs" };
+const char* const strengthNames[] = { "off", "low", "mid", "high" };
 
 template <typename Enum, size_t N>
 Enum enumFrom (const juce::var& v, const char* const (&names)[N], Enum fallback)
@@ -626,6 +655,10 @@ juce::var conditionSettingsToVar (const ConditionSettings& s)
     auto* o = new juce::DynamicObject();
     o->setProperty ("preset", presetNames[(int) s.preset]);
     o->setProperty ("dcRemove", s.options.dcRemove);
+    o->setProperty ("declip", s.options.declip);
+    o->setProperty ("declick", strengthNames[(int) s.options.declick]);
+    o->setProperty ("dewind", strengthNames[(int) s.options.dewind]);
+    o->setProperty ("denoise", strengthNames[(int) s.options.denoise]);
     o->setProperty ("hum", humNames[(int) s.options.humMode]);
     o->setProperty ("pan", panNames[(int) s.options.panMode]);
     o->setProperty ("lowCutHz", (double) s.options.lowCutHz);
@@ -647,6 +680,10 @@ ConditionSettings conditionSettingsFromVar (const juce::var& v)
     s.preset = enumFrom (v.getProperty ("preset", {}), presetNames, ConditionPreset::off);
     auto& o = s.options;
     o.dcRemove = (bool) v.getProperty ("dcRemove", false);
+    o.declip = (bool) v.getProperty ("declip", false);
+    o.declick = enumFrom (v.getProperty ("declick", {}), strengthNames, Strength::off);
+    o.dewind = enumFrom (v.getProperty ("dewind", {}), strengthNames, Strength::off);
+    o.denoise = enumFrom (v.getProperty ("denoise", {}), strengthNames, Strength::off);
     o.humMode = enumFrom (v.getProperty ("hum", {}), humNames, HumMode::off);
     o.panMode = enumFrom (v.getProperty ("pan", {}), panNames, PanMode::off);
 
@@ -699,10 +736,23 @@ juce::String describeConditioning (const ConditionOptions& options, const Condit
     juce::StringArray parts;
     if (options.dcRemove)
         parts.add ("dc");
+    if (options.declip)
+        parts.add (report.declipRuns > 0 ? "declip=" + juce::String (report.declipRuns) + (report.declipGainDb < -0.05 ? "/" + juce::String (report.declipGainDb, 1) + "dB" : juce::String())
+                                         : juce::String ("declip=none"));
+    if (options.declick != Strength::off)
+        parts.add (report.clicksTooMany ? juce::String ("declick=skipped")
+                                        : report.clicksFixed > 0 ? "declick=" + juce::String (report.clicksFixed) : juce::String ("declick=none"));
     if (options.humMode != HumMode::off)
         parts.add (report.humHz > 0.0 ? "hum" + juce::String (report.humHz, 0) + "Hz/" + juce::String (report.humNotches) : juce::String ("hum=none"));
     if (options.lowCutHz > 0.0f)
         parts.add ("lc" + juce::String (options.lowCutHz, 0) + "Hz/" + juce::String (options.lowCutOrder >= 4 ? 4 : 2));
+
+    if (options.dewind != Strength::off)
+        parts.add (report.windFrames > 0 ? "dewind=" + juce::String (report.windFrames) + "f/" + juce::String (report.windMaxCutoffHz, 0) + "Hz" : juce::String ("dewind=none"));
+    if (options.denoise != Strength::off)
+        parts.add (report.denoiseOutcome == DenoiseOutcome::applied
+                       ? "denoise=" + juce::String (report.denoiseAvgDb, 1) + "dB/floor" + juce::String (report.noiseFloorDb, 0) + "dBFS"
+                       : juce::String ("denoise=none"));
 
     if (options.panMode != PanMode::off)
         parts.add (report.panApplied ? "pan" + juce::String (report.panDb >= 0 ? "+" : "") + juce::String (report.panDb, 1) + "dB" : juce::String ("pan=none"));

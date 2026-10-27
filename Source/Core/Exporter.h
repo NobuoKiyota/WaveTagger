@@ -44,6 +44,9 @@ struct ExportResult
     // Left/right balance: whether it was corrected, and the measured left-minus-right difference in dB
     bool panApplied = false;
     double panDb = 0.0;
+
+    // Repairs (de-clip / de-click / de-wind / de-noise): what stage A reported for the whole recording
+    ConditionReport fileReport;
 };
 
 /** Writes each region as a 24-bit WAV (source rate / channels) with a short fade at both edges. Never overwrites.
