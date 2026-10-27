@@ -1053,6 +1053,59 @@ void MainComponent::previewCycle (int index)
     playRange (c.start, c.end, false);
 }
 
+/** Left / right key: selects the previous / next cycle (from the selected one, or else from the cursor) and brings it into view. */
+void MainComponent::jumpToCycle (int direction)
+{
+    if (audio == nullptr || cycles.size() == 0)
+        return;
+
+    int target = -1;
+    const auto rows = list.getSelectedRows();
+    if (rows.size() > 0)
+    {
+        int lo = rows[0], hi = rows[0];
+        for (const auto r : rows)
+        {
+            lo = juce::jmin (lo, r);
+            hi = juce::jmax (hi, r);
+        }
+        target = direction > 0 ? hi + 1 : lo - 1;
+    }
+    else
+    {
+        const auto cursor = view.getCursor();
+        if (direction > 0)
+        {
+            for (int i = 0; i < cycles.size(); ++i)
+                if (cycles[i].start > cursor)
+                {
+                    target = i;
+                    break;
+                }
+        }
+        else
+        {
+            for (int i = cycles.size() - 1; i >= 0; --i)
+                if (cycles[i].start < cursor)
+                {
+                    target = i;
+                    break;
+                }
+        }
+    }
+
+    if (target < 0 || target >= cycles.size())
+        return; // already at the first / last one
+
+    list.selectRow (target);
+    waveView.setSelectedCycles ({ target });
+    view.setCursor (cycles[target].start);
+    view.ensureVisible ((double) cycles[target].end);
+    view.ensureVisible ((double) cycles[target].start);
+    if (autoPreviewToggle.getToggleState())
+        previewCycle (target);
+}
+
 /** The cycles a key acts on: the selected rows, or else the cycle under the cursor. */
 juce::Array<int> MainComponent::targetRows() const
 {
@@ -2589,8 +2642,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
             break;
         case Action::ZoomIn:        view.zoomAround (centrePx, 0.5); break;
         case Action::ZoomOut:       view.zoomAround (centrePx, 2.0); break;
-        case Action::ScrollLeft:    view.scrollPixels (-view.getWidth() * 0.1); break;
-        case Action::ScrollRight:   view.scrollPixels (view.getWidth() * 0.1); break;
+        case Action::PrevCycle:     jumpToCycle (-1); break;
+        case Action::NextCycle:     jumpToCycle (1); break;
         case Action::AutoSplit:     showAutoSplitDialog(); break;
         case Action::ImportMarkers: doImportMarkers(); break;
         case Action::SaveWav:       saveMarkersToWav(); break;

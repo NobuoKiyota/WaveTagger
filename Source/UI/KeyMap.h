@@ -9,7 +9,7 @@ enum class Action
     None = 0,
     Open, Library, Export, SelectAll, Undo, Redo,
     PlayStop, Confirm, Cancel, Delete,
-    ToStart, ToEnd, ZoomFit, ZoomSelection, ToggleLoop, ZoomIn, ZoomOut, ScrollLeft, ScrollRight,
+    ToStart, ToEnd, ZoomFit, ZoomSelection, ToggleLoop, ZoomIn, ZoomOut, PrevCycle, NextCycle,
     AutoSplit, ImportMarkers, SaveWav, AcceptSuggestion, ToggleConditioned,
     Rate0, Rate1, Rate2, Rate3, Rate4, Rate5, ToggleNg, EditAttributes, ExportDataset,
     Type1, Type2, Type3, Type4, Type5, Type6, Type7, Type8, Type9,

@@ -21,7 +21,7 @@ const Info infos[numActions] = {
     { "delete", "サイクルを削除" },
     { "toStart", "先頭へ" },               { "toEnd", "末尾へ" },                 { "zoomFit", "全体を表示" },
     { "zoomSelection", "選択範囲にズーム" }, { "toggleLoop", "ループ切替" },        { "zoomIn", "拡大 (時間)" },
-    { "zoomOut", "縮小 (時間)" },          { "scrollLeft", "左へスクロール" },     { "scrollRight", "右へスクロール" },
+    { "zoomOut", "縮小 (時間)" },          { "prevCycle", "前のサイクルへ" },       { "nextCycle", "次のサイクルへ" },
     { "autoSplit", "自動分割" },           { "importMarkers", "マーカー読み込み" },
     { "saveWav", "WAV にマーカーを書き込む" },
     { "acceptSuggestion", "候補の Type を採用" },
@@ -77,8 +77,8 @@ void KeyMap::reset()
     set (Action::ToggleLoop, { plain ('L') });
     set (Action::ZoomIn, { ch ('+'), ch ('='), plain (juce::KeyPress::numberPadAdd) });
     set (Action::ZoomOut, { ch ('-'), plain (juce::KeyPress::numberPadSubtract) });
-    set (Action::ScrollLeft, { plain (juce::KeyPress::leftKey) });
-    set (Action::ScrollRight, { plain (juce::KeyPress::rightKey) });
+    set (Action::PrevCycle, { plain (juce::KeyPress::leftKey) });
+    set (Action::NextCycle, { plain (juce::KeyPress::rightKey) });
 
     for (int i = 0; i < 9; ++i)
         set ((Action) ((int) Action::Type1 + i), { ch ((juce::juce_wchar) ('1' + i)) });
