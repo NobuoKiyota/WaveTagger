@@ -81,7 +81,8 @@ InboxPanel::InboxPanel (InboxQueue& q, Hooks h)
     retryButton.setButtonText (WT_U8 ("失敗を再試行"));
     removeButton.setButtonText (WT_U8 ("一覧から外す"));
     revealButton.setButtonText (WT_U8 ("場所を開く"));
-    for (auto* b : { &openButton, &reviewedButton, &retryButton, &removeButton, &revealButton })
+    trashButton.setButtonText (WT_U8 ("ごみ箱へ..."));
+    for (auto* b : { &openButton, &reviewedButton, &retryButton, &removeButton, &revealButton, &trashButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -114,6 +115,10 @@ InboxPanel::InboxPanel (InboxQueue& q, Hooks h)
                 hooks.queueChanged();
             refresh();
         }
+    };
+    trashButton.onClick = [this] {
+        if (const auto* item = selectedItem(); item != nullptr && hooks.trashItem)
+            hooks.trashItem (*item);
     };
     revealButton.onClick = [this] {
         if (const auto* item = selectedItem())
@@ -227,6 +232,7 @@ void InboxPanel::resized()
     removeButton.setBounds (bottom.removeFromLeft (110));
     bottom.removeFromLeft (6);
     revealButton.setBounds (bottom.removeFromLeft (100));
+    trashButton.setBounds (bottom.removeFromRight (110));
 
     table.setBounds (r);
 }

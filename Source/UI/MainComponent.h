@@ -141,6 +141,7 @@ private:
     juce::String humStatusText() const;
     juce::String panStatusText() const;
     juce::String cleanStatusText() const;
+    void confirmTrashInboxItem (const QueueItem& q);
     juce::String selectionGainText();
     void applySharedPreferences (const juce::var& prefs);
     void chooseCategory (const juce::String& name);

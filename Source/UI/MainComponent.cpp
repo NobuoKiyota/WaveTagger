@@ -1762,11 +1762,75 @@ InboxPanel::Hooks MainComponent::makeInboxHooks()
         updateInboxBadge();
         inboxWatcher.scanNow();
     };
+    hooks.trashItem = [this] (const QueueItem& q) { confirmTrashInboxItem (q); };
     hooks.queueChanged = [this] {
         inboxQueue.save();
         updateInboxBadge();
     };
     return hooks;
+}
+
+void MainComponent::confirmTrashInboxItem (const QueueItem& q)
+{
+    // Only what the inbox itself made: the Raw copy (inside the Raw folder) and the original that was moved to <inbox>/_Done
+    // (or is still in the inbox). Nothing else, and never the old library.
+    const auto inside = [] (const juce::File& f, const juce::File& dir) {
+        return dir.getFullPathName().isNotEmpty() && f.isAChildOf (dir);
+    };
+    juce::Array<juce::File> files;
+    juce::StringArray skipped;
+    for (const auto& path : { q.raw, q.archived, q.status == "failed" ? q.original : juce::String() })
+    {
+        const juce::File f (path);
+        if (path.isEmpty() || ! f.existsAsFile())
+            continue;
+        if (audio != nullptr && audio->file == f)
+            skipped.add (f.getFullPathName() + WT_U8 (" (エディタで開いています)"));
+        else if (! (inside (f, rawDir) || inside (f, inboxDir)) || f.getFullPathName().startsWithIgnoreCase ("G:\\SE\\"))
+            skipped.add (f.getFullPathName() + WT_U8 (" (Raw / 受信フォルダの外)"));
+        else
+            files.addIfNotAlreadyThere (f);
+    }
+
+    if (files.isEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Inbox",
+                                                skipped.isEmpty() ? WT_U8 ("ごみ箱に送れるファイルがありません (一覧から外すだけにしてください)")
+                                                                  : WT_U8 ("次のファイルは送れません:\n") + skipped.joinIntoString ("\n"));
+        return;
+    }
+
+    juce::String msg = WT_U8 ("次のファイルをごみ箱に送ります (ごみ箱から戻せます):\n\n");
+    for (const auto& f : files)
+        msg += f.getFullPathName() + "\n";
+    if (skipped.size() > 0)
+        msg += WT_U8 ("\n送らないもの:\n") + skipped.joinIntoString ("\n");
+    msg += WT_U8 ("\n\nこの録音の区切り・タイプの記録も、一覧から消えます。");
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    const auto original = q.original, raw = q.raw;
+    juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::WarningIcon, WT_U8 ("録音をごみ箱へ"), msg, WT_U8 ("ごみ箱へ送る"), WT_U8 ("キャンセル"), this,
+                                        juce::ModalCallbackFunction::create ([safe, files, original, raw] (int result) {
+                                            if (result != 1 || safe == nullptr)
+                                                return;
+                                            juce::StringArray failed;
+                                            for (const auto& f : files)
+                                                if (! f.moveToTrash())
+                                                    failed.add (f.getFullPathName());
+                                            auto& queue = safe->inboxQueue;
+                                            for (int i = 0; i < queue.size(); ++i)
+                                                if (queue.getItems()[(size_t) i].original == original && queue.getItems()[(size_t) i].raw == raw)
+                                                {
+                                                    if (failed.isEmpty())
+                                                        queue.remove (i);
+                                                    break;
+                                                }
+                                            queue.save();
+                                            safe->updateInboxBadge();
+                                            if (failed.size() > 0)
+                                                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Inbox",
+                                                                                        WT_U8 ("ごみ箱に送れませんでした:\n") + failed.joinIntoString ("\n"));
+                                        }));
 }
 
 void MainComponent::showOrganizer()

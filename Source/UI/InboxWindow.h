@@ -19,6 +19,7 @@ public:
         std::function<void()> chooseInbox, chooseRaw, scanNow;
         std::function<void (bool)> setWatching;
         std::function<void (const QueueItem&)> openItem, retryItem;
+        std::function<void (const QueueItem&)> trashItem; // asks, then moves the recordings to the recycle bin and drops the row
         std::function<void()> queueChanged; // after "reviewed" / "remove": save and update the toolbar badge
     };
 
@@ -47,7 +48,7 @@ private:
     juce::TextButton chooseInboxButton, chooseRawButton, scanButton;
     juce::ToggleButton watchToggle, orderToggle;
     std::vector<int> displayOrder;
-    juce::TextButton openButton, reviewedButton, retryButton, removeButton, revealButton;
+    juce::TextButton openButton, reviewedButton, retryButton, removeButton, revealButton, trashButton;
     juce::TableListBox table { "inbox", this };
     int lastSize = -1, lastNew = -1;
 

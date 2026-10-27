@@ -9,6 +9,7 @@ struct QueueItem
 {
     juce::String raw;        // the Raw copy that carries the markers (empty for a failure)
     juce::String original;   // where the recording was found
+    juce::String archived;   // where the original went (<inbox>/_Done/...; empty if it was not moved)
     juce::String status;     // "new" | "reviewed" | "failed"
     juce::String error;
     juce::String category, type;
@@ -32,6 +33,7 @@ public:
         QueueItem q;
         q.original = o.original.getFullPathName();
         q.raw = o.rawFile.getFullPathName();
+        q.archived = o.archived.getFullPathName();
         q.status = o.ok ? "new" : "failed";
         q.error = o.ok ? o.archiveNote : o.error;
         q.category = o.categoryHint;
@@ -104,6 +106,7 @@ public:
             auto* o = new juce::DynamicObject();
             o->setProperty ("raw", q.raw);
             o->setProperty ("original", q.original);
+            o->setProperty ("archived", q.archived);
             o->setProperty ("status", q.status);
             o->setProperty ("error", q.error);
             o->setProperty ("category", q.category);
@@ -128,6 +131,7 @@ public:
                 QueueItem q;
                 q.raw = v.getProperty ("raw", "").toString();
                 q.original = v.getProperty ("original", "").toString();
+                q.archived = v.getProperty ("archived", "").toString();
                 q.status = v.getProperty ("status", "new").toString();
                 q.error = v.getProperty ("error", "").toString();
                 q.category = v.getProperty ("category", "").toString();
