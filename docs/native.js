@@ -76,6 +76,8 @@
   /** Google's consent screen (only when Google asks for it), then the waiting recordings are sent. */
   WTNative.connect = function () { return call('connect'); };
   WTNative.upload = function () { return call('upload'); };
+  /** Android's share sheet for one recording (Drive, mail, chat...). */
+  WTNative.share = function (name) { return call('share', { name: name }); };
   WTNative.getSettings = function () { return call('getSettings'); };
   WTNative.setSettings = function (s) { return call('setSettings', s); };
   WTNative.onBlock = null;

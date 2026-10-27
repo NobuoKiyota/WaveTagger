@@ -78,6 +78,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) : Wor
         private const val CHANNEL = "upload"
         private const val NOTIFICATION_ID = 2
 
+        /** The setting "send by itself when a recording is stopped" (on by default). A manual send always works. */
+        fun auto(context: Context): Boolean = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("autoUpload", true)
+
         /** (Re)starts the sending. Safe to call at any time: a half-sent file is continued, not sent twice. */
         fun enqueue(context: Context) {
             val request = OneTimeWorkRequestBuilder<UploadWorker>()

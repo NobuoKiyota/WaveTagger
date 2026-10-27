@@ -1,5 +1,5 @@
 // Offline shell: the recorder opens (and records) without a connection; uploads wait until there is one.
-const CACHE = 'wtrec-v6';
+const CACHE = 'wtrec-v7';
 const FILES = ['./', 'index.html', 'app.js', 'wav.js', 'loudness.js', 'scope.js', 'native.js', 'worklet.js', 'manifest.webmanifest', 'icon.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {

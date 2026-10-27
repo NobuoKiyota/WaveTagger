@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -13,7 +15,12 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1-m1"
+        // The Drive folder the recordings go to, set once in local.properties (not in Git): defaultFolder=<folder ID>. It only fills
+        // the setting the first time, so the app never starts with an empty folder after a reinstall.
+        val local = Properties().apply { rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) } }
+        buildConfigField("String", "DEFAULT_FOLDER", "\"" + (local.getProperty("defaultFolder") ?: "") + "\"")
     }
+    buildFeatures { buildConfig = true }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

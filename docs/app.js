@@ -576,7 +576,14 @@
         if (r.status === 'done') { b.className = 'st-done'; b.textContent = 'Drive に送信済み'; }
         else if (r.status === 'fail') { b.className = 'st-fail'; b.textContent = '失敗: ' + r.error; waiting++; }
         else { b.className = 'st-wait'; b.textContent = '送信待ち'; waiting++; }
-        li.appendChild(a); li.appendChild(b); ul.appendChild(li);
+        li.appendChild(a); li.appendChild(b);
+        if (window.WTNative && WTNative.available) {
+          var sh = document.createElement('button');
+          sh.textContent = '共有';
+          sh.addEventListener('click', function () { WTNative.share(r.name).catch(function (e) { $('info').textContent = '共有できません: ' + (e && e.message || e); }); });
+          li.appendChild(sh);
+        }
+        ul.appendChild(li);
       });
       $('retry').classList.toggle('hidden', waiting === 0);
       waitingCount = waiting;
@@ -807,6 +814,7 @@
     return Promise.all([WTNative.getState(), WTNative.getSettings()]).then(function (r) {
       nat.authOk = !!r[0].authOk; nat.folderSet = !!r[0].folderSet; nat.uploadError = r[0].uploadError || '';
       if (document.activeElement !== $('folder')) $('folder').value = r[1].folder || '';
+      $('autoUp').checked = r[1].autoUpload !== false;
       showAuth();
       return renderList();
     }).catch(function () { /* the app is busy: the next round will do */ });
@@ -823,6 +831,12 @@
   if (isNative()) {
     $('calBox').classList.remove('hidden');
     $('calBtn').addEventListener('click', calibrate);
+    $('autoUpBox').classList.remove('hidden');
+    $('autoUp').addEventListener('change', function () { WTNative.setSettings({ autoUpload: $('autoUp').checked }); });
+    // the notification's stop button can end a recording while the page is not looking: follow it
+    setInterval(function () {
+      if (recording && nativeOpen) WTNative.getState().then(function (s) { if (recording && !s.recording) stopRecording(); }).catch(function () {});
+    }, 2000);
     $('clientId').classList.add('hidden');             // the app is identified by its package and signing key, not by a client ID typed here
     var cl = document.querySelector('label[for="clientId"]'); if (cl) cl.classList.add('hidden');
     refreshNative().then(function () { if (!nat.folderSet) showTab('Set'); });

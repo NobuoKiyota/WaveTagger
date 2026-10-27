@@ -21,11 +21,13 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -37,8 +39,7 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private val ui = Handler(Looper.getMainLooper())
 
-    private var visible = false
-    private var recording = Recorder.isRecording // the screen is recording: the left/right assignment must not change now
+    private val recording: Boolean get() = Recorder.isRecording // the left/right assignment must not change while it is recording
     private var pendingOpen: Pair<Int, String>? = null
 
     private val inflight = AtomicInteger(0)
@@ -52,11 +53,13 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("wtrec", MODE_PRIVATE)
         Recordings.init(filesDir)
+        if (prefs.getString("folder", "").isNullOrEmpty() && BuildConfig.DEFAULT_FOLDER.isNotEmpty())
+            prefs.edit().putString("folder", BuildConfig.DEFAULT_FOLDER).apply()
         if (!Recorder.isRecording) Thread { // a recording cut off by a crash is repaired; sent ones are removed after the keep time
             Recordings.recover()
             Recordings.cleanup(prefs.getInt("keepDays", 7))
             copyToDownloads()
-            if (prefs.getBoolean("authOk", false) && Recordings.list().any { it.status != "done" }) UploadWorker.enqueue(this)
+            if (UploadWorker.auto(this) && prefs.getBoolean("authOk", false) && Recordings.list().any { it.status != "done" }) UploadWorker.enqueue(this)
         }.start()
 
         val loader = WebViewAssetLoader.Builder()
@@ -125,10 +128,12 @@ class MainActivity : Activity() {
                     prefs.edit().apply {
                         putString("source", args.optString("source", prefs.getString("source", "MIC")))
                         if (args.has("folder")) putString("folder", args.optString("folder").trim())
+                        if (args.has("autoUpload")) putBoolean("autoUpload", args.optBoolean("autoUpload", true))
                     }.apply()
                     resolve(id, true, settings().toString())
                 }
                 "connect" -> connectGoogle(id)
+                "share" -> { share(args.optString("name")); resolve(id, true, "{}") }
                 "upload" -> { UploadWorker.enqueue(this); resolve(id, true, state().toString()) }
                 "flipSwap" -> { // the automatic left/right adjustment found this rotation reversed
                     if (recording) throw IllegalStateException("録音中は変えられません")
@@ -149,6 +154,7 @@ class MainActivity : Activity() {
         .put("flip90", prefs.getBoolean("flip90", false))
         .put("flip270", prefs.getBoolean("flip270", false))
         .put("folder", prefs.getString("folder", ""))
+        .put("autoUpload", prefs.getBoolean("autoUpload", true))
 
     // ---------------------------------------------------------------- Google (consent screen only when Google asks for it)
     private var pendingConnect: Int? = null
@@ -263,26 +269,28 @@ class MainActivity : Activity() {
             "; content=16-bit precision (the phone delivers a 16-bit signal)"
         val stamp = java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", java.util.Locale.US).format(java.util.Date())
         val name = Recorder.start(Recordings.dir, stamp, info.channels, info.rate, if (bits == 16) 16 else 24, comment)
-        recording = true
         ContextCompat.startForegroundService(this, Intent(this, CaptureService::class.java).putExtra(CaptureService.EXTRA_RECORDING, true))
         return JSONObject().put("name", name)
     }
 
     private fun stopRecording(): JSONObject {
-        val source = Capture.info?.source ?: ""
-        val r = Recorder.stop(source)
-        recording = false
+        val result = RecordingControl.stop(this) // also what the notification's stop button runs
         updateSwap()
-        ContextCompat.startForegroundService(this, Intent(this, CaptureService::class.java)) // back to the plain notification
-        Thread { copyToDownloads() }.start()
-        if (!r.silent) UploadWorker.enqueue(this) // to Drive when there is a network (and Google is connected)
-        return JSONObject().put("files", org.json.JSONArray(r.files)).put("seconds", r.seconds).put("peak", r.peak.toDouble())
-            .put("silent", r.silent).put("bad", r.badSamples).put("error", r.error ?: JSONObject.NULL)
+        return result
     }
 
     /** A copy in Download/WaveTagger for listening back and for getting the files to the PC (the setting `copyDownloads`, on by default). */
-    private fun copyToDownloads() {
-        if (prefs.getBoolean("copyDownloads", true)) try { Downloads.copyMissing(this) } catch (e: Throwable) { Log.w(TAG, "copy failed: $e") }
+    private fun copyToDownloads() = RecordingControl.copyToDownloads(this)
+
+    /** Android's share sheet (Drive, mail, chat...) for one recording, without Google being connected here. */
+    private fun share(name: String) {
+        val file = File(Recordings.dir, File(name).name)
+        if (!file.exists()) throw IllegalStateException("ファイルがありません")
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+        val send = Intent(Intent.ACTION_SEND).setType("audio/wav").putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        send.clipData = android.content.ClipData.newRawUri(file.name, uri)
+        startActivity(Intent.createChooser(send, "録音を共有"))
     }
 
     private fun listRecordings(): org.json.JSONArray {
@@ -364,6 +372,8 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        /** The screen is in front (the notification's stop button needs to know whether the microphone should be closed too). */
+        @Volatile var visible = false
         private const val TAG = "WTRec"
         private const val DOMAIN = "appassets.androidplatform.net"
         private const val REQUEST_AUDIO = 7
