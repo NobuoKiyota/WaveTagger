@@ -80,6 +80,7 @@
 
 1. **APK を入れる**: ビルドした `app-debug.apk` を Drive (`pcm録音/WTRec.apk`) に置き、スマホの Drive アプリから開いてインストールします (上書きで入れ直せます)。
 2. **OAuth クライアント (最初の 1 回)**: Cloud Console で種類 **Android** のクライアントを作ります。パッケージ名 `jp.wavetagger.rec`、SHA-1 は APK の署名鍵のもの (`apksigner verify --print-certs <apk>` で確認。このPCのデバッグ鍵は `F4:9D:90:D2:DB:51:82:0E:7B:57:B7:97:98:B9:88:99:7C:A3:D9:61`)。ブラウザ版のクライアント ID とは別物で、アプリには入力しません。Drive API を有効にし、同意画面がテスト状態なら自分をテストユーザーに入れます (テストのままだと同意は約 7 日で切れます)。
+   - **複数の PC でビルドする時**: デバッグ鍵は PC ごとに違うので、そのままでは別の PC でビルドした APK をスマホに上書きできず、Google の接続も通りません。最初に登録した PC の `%USERPROFILE%\.android\debug.keystore` を Drive に置き、各 PC の `android/WaveTaggerRec/local.properties` に `signingStore=<そのパス>` と書くと、どの PC でも同じ鍵で署名されます。
 3. **保存先フォルダ**: ビルド時に `android/WaveTaggerRec/local.properties` の `defaultFolder=<Inbox のフォルダ ID>` を入れておくと、再インストール後も最初から入っています。画面の設定タブで変えることもできます。
 4. 設定タブの「Google に接続」で同意すると、以後は録音を止めた時に自動で送られます (画面オフ・アプリを閉じていても送信待ちは続きます)。エラーは設定タブの接続表示に出ます (`status=8` = 登録の署名・パッケージが合っていない、`status=10` = クライアントの設定違い)。
 5. 初回に設定タブの「左右の自動調整」で、端末の左右の向きを合わせます。
